@@ -16,8 +16,6 @@ No Electron. No browser extension. One command to install.
 [![Downloads](https://img.shields.io/github/downloads/yagcioglutoprak/AIQuotaBar/total)](https://github.com/yagcioglutoprak/AIQuotaBar/releases)
 [![Latest Release](https://img.shields.io/github/v/release/yagcioglutoprak/AIQuotaBar)](https://github.com/yagcioglutoprak/AIQuotaBar/releases/latest)
 
-**Featured on Hacker News (161 points, 49 comments) · Product Hunt (382 upvotes)**
-
 ---
 
 ## Install
@@ -34,7 +32,7 @@ brew install --HEAD aiquotabar
 aiquotabar &
 ```
 
-The app launches immediately and auto-detects your Claude, ChatGPT, Cursor, and Copilot sessions from Chrome, Arc, Firefox, or Safari — no copy-pasting cookies.
+The app launches immediately and auto-detects your Claude, ChatGPT, Cursor, and Copilot sessions from Chrome, Arc, Brave, Edge, Firefox, or Safari — no copy-pasting cookies.
 
 ---
 
@@ -126,7 +124,7 @@ cd AIQuotaBarWidget && ./build_widget.sh
 - **macOS notifications** — alerts at 80% and 95% usage for Claude, ChatGPT, and Cursor
 - **Configurable refresh** — 1 / 5 / 15 min
 - **Runs at login** — via LaunchAgent, toggle from the menu
-- **Tiny footprint** — ~900 lines of Python, no Electron, no background services beyond the app itself
+- **Tiny footprint** — single-file Python app, no Electron, no background services beyond the app itself
 
 ---
 
@@ -140,7 +138,7 @@ cd AIQuotaBarWidget && ./build_widget.sh
 | Desktop widget | ✅ Native WidgetKit | ❌ | ❌ |
 | Privacy | ✅ Local only | ✅ | ⚠️ Depends on extension |
 | Install | ✅ One command | ✅ Nothing | ❌ Store + permissions |
-| No Electron | ✅ ~900 lines Python | ✅ | ❌ Often Electron |
+| No Electron | ✅ Single-file Python | ✅ | ❌ Often Electron |
 
 ---
 
@@ -148,8 +146,8 @@ cd AIQuotaBarWidget && ./build_widget.sh
 
 - macOS 12+
 - Python 3.10+
-- A Claude.ai paid account
-- Chrome, Arc, Brave, Edge, Firefox, or Safari with an active Claude session
+- A paid account for any supported service (Claude, ChatGPT, Cursor, or Copilot)
+- Chrome, Arc, Brave, Edge, Firefox, or Safari with an active session
 
 ---
 

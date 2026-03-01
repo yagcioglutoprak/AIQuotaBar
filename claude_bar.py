@@ -15,6 +15,7 @@ Setup:
 import rumps
 from curl_cffi import requests  # Chrome TLS fingerprint — bypasses Cloudflare
 from curl_cffi.requests.exceptions import HTTPError as CurlHTTPError
+import atexit
 import json
 import math
 import os
@@ -25,6 +26,7 @@ import tempfile
 import time
 import threading
 import logging
+import logging.handlers
 import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -38,11 +40,11 @@ except ImportError:
 # ── logging ──────────────────────────────────────────────────────────────────
 
 LOG_FILE = os.path.expanduser("~/.claude_bar.log")
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s %(message)s",
+_log_handler = logging.handlers.RotatingFileHandler(
+    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3,
 )
+_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+logging.basicConfig(handlers=[_log_handler], level=logging.DEBUG)
 log = logging.getLogger(__name__)
 
 CONFIG_FILE = os.path.expanduser("~/.claude_bar_config.json")
@@ -272,10 +274,9 @@ def _init_history_db() -> sqlite3.Connection:
 
 
 def _record_sample(conn: sqlite3.Connection, key: str, pct: int):
-    """Insert one usage sample into the samples table."""
+    """Insert one usage sample into the samples table (caller should batch commits)."""
     now = datetime.now(timezone.utc).timestamp()
     conn.execute("INSERT INTO samples (ts, key, pct) VALUES (?, ?, ?)", (now, key, pct))
-    conn.commit()
 
 
 def _rollup_daily_stats(conn: sqlite3.Connection):
@@ -558,6 +559,7 @@ class ProviderData:
     currency: str = "USD"
     period: str = "this month"
     error: str | None = None
+    _rows: list = field(default_factory=list, repr=False)
 
     @property
     def pct(self) -> int | None:
@@ -1109,7 +1111,7 @@ def _write_widget_cache(
 ) -> None:
     """Write current usage snapshot for the WidgetKit widget.
 
-    Writes to ~/Library/Group Containers/group.com.aiquotabar/usage.json
+    Writes to ~/Library/Application Support/AIQuotaBar/usage.json
     using atomic replace so the widget never reads a partial file.
     Failures are logged but never crash the main app.
     """
@@ -1994,34 +1996,21 @@ def _is_login_item() -> bool:
 
 
 def _add_login_item():
+    import plistlib
     path = _script_path()
-    script = (
-        f'tell application "System Events" to make login item at end '
-        f'with properties {{path:"/usr/bin/python3", name:"ClaudeBar", hidden:false}}'
-    )
-    # Use launchctl + a plist for reliability
     plist = os.path.expanduser("~/Library/LaunchAgents/com.claudebar.plist")
     python_exe = sys.executable
-    content = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.claudebar</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{python_exe}</string>
-        <string>{path}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <false/>
-</dict>
-</plist>"""
-    with open(plist, "w") as f:
-        f.write(content)
-    subprocess.run(["launchctl", "load", plist], capture_output=True)
+    plist_data = {
+        "Label": "com.claudebar",
+        "ProgramArguments": [python_exe, path],
+        "RunAtLoad": True,
+        "KeepAlive": False,
+    }
+    with open(plist, "wb") as f:
+        plistlib.dump(plist_data, f)
+    result = subprocess.run(["launchctl", "load", plist], capture_output=True)
+    if result.returncode != 0:
+        log.warning("launchctl load failed: %s", result.stderr.decode(errors="replace"))
 
 
 def _remove_login_item():
@@ -2034,10 +2023,13 @@ def _remove_login_item():
 # ── native macOS dialogs via osascript ───────────────────────────────────────
 
 def _ask_text(title: str, prompt: str, default: str = "") -> str | None:
+    def _esc(s: str) -> str:
+        """Escape a string for safe embedding in AppleScript double-quoted strings."""
+        return s.replace("\\", "\\\\").replace('"', '\\"')
     script = (
-        f'display dialog "{prompt}" '
-        f'default answer "{default}" '
-        f'with title "{title}" '
+        f'display dialog "{_esc(prompt)}" '
+        f'default answer "{_esc(default)}" '
+        f'with title "{_esc(title)}" '
         f'buttons {{"Cancel", "Save"}} default button "Save"'
     )
     try:
@@ -2198,6 +2190,14 @@ def _show_text(title: str, text: str):
         tmp.write(text)
         tmp.close()
         subprocess.Popen(["open", "-a", "TextEdit", tmp.name])
+        # Schedule cleanup after 60 seconds (enough time for TextEdit to open)
+        def _cleanup():
+            time.sleep(60)
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        threading.Thread(target=_cleanup, daemon=True).start()
     except Exception:
         log.exception("_show_text failed")
 
@@ -2233,6 +2233,9 @@ class ClaudeBar(rumps.App):
         self._ui_pending_title: str | None = None
         self._ui_pending_data: UsageData | None = None
         self._ui_lock = threading.Lock()
+        self._config_lock = threading.Lock()
+        self._db_lock = threading.Lock()
+        self._login_item_cached: bool | None = None
 
         if not _is_login_item():
             _add_login_item()
@@ -2249,7 +2252,20 @@ class ClaudeBar(rumps.App):
         self._welcome_timer.start()
 
         # Always try to fetch on startup — browser JS works even without saved cookies
+        atexit.register(self._shutdown)
         self._schedule_fetch()
+
+    def _shutdown(self):
+        """Clean up resources on exit."""
+        try:
+            self._history_db.close()
+        except Exception:
+            pass
+
+    def _is_login_item_cached(self) -> bool:
+        if self._login_item_cached is None:
+            self._login_item_cached = _is_login_item()
+        return self._login_item_cached
 
     # ── menu ─────────────────────────────────────────────────────────────────
 
@@ -2520,7 +2536,7 @@ class ClaudeBar(rumps.App):
         items.append(None)
 
         login_item = rumps.MenuItem("Launch at Login", callback=self._toggle_login_item)
-        login_item._menuitem.setState_(1 if _is_login_item() else 0)
+        login_item._menuitem.setState_(1 if self._is_login_item_cached() else 0)
         items.append(login_item)
 
         # Desktop Widget status
@@ -2663,20 +2679,23 @@ class ClaudeBar(rumps.App):
         self._schedule_fetch()
 
     def _schedule_fetch(self):
-        if self._fetching:
-            return
+        with self._ui_lock:
+            if self._fetching:
+                return
+            self._fetching = True
         threading.Thread(target=self._fetch_and_update, daemon=True).start()
 
     def _fetch_and_update(self):
-        self._fetching = True
 
         try:
-            sk = self.config.get("cookie_str")
+            with self._config_lock:
+                sk = self.config.get("cookie_str")
             if not sk:
                 sk = _auto_detect_cookies()
                 if sk:
-                    self.config["cookie_str"] = sk
-                    save_config(self.config)
+                    with self._config_lock:
+                        self.config["cookie_str"] = sk
+                        save_config(self.config)
             if not sk:
                 self._post_title("◆")
                 self._fetching = False
@@ -2715,22 +2734,24 @@ class ClaudeBar(rumps.App):
 
             # ── record to SQLite history ──
             try:
-                if data.session:
-                    _record_sample(self._history_db, "claude", data.session.pct)
-                for prefix, pname in [("chatgpt", "ChatGPT"), ("cursor", "Cursor")]:
-                    pd = next((p for p in self._provider_data if p.name == pname), None)
-                    if pd and not pd.error:
-                        rows = getattr(pd, "_rows", None)
-                        if rows:
-                            for row in rows:
-                                hkey = f"{prefix}_{row.label.lower().replace(' ', '_')}"
-                                _record_sample(self._history_db, hkey, row.pct)
-                if copilot_pd and not copilot_pd.error and copilot_pd.pct is not None:
-                    _record_sample(self._history_db, "copilot", copilot_pd.pct)
-                # Periodic rollup (every hour)
-                if time.time() - self._last_rollup > 3600:
-                    _rollup_daily_stats(self._history_db)
-                    self._last_rollup = time.time()
+                with self._db_lock:
+                    if data.session:
+                        _record_sample(self._history_db, "claude", data.session.pct)
+                    for prefix, pname in [("chatgpt", "ChatGPT"), ("cursor", "Cursor")]:
+                        pd = next((p for p in self._provider_data if p.name == pname), None)
+                        if pd and not pd.error:
+                            rows = getattr(pd, "_rows", None)
+                            if rows:
+                                for row in rows:
+                                    hkey = f"{prefix}_{row.label.lower().replace(' ', '_')}"
+                                    _record_sample(self._history_db, hkey, row.pct)
+                    if copilot_pd and not copilot_pd.error and copilot_pd.pct is not None:
+                        _record_sample(self._history_db, "copilot", copilot_pd.pct)
+                    self._history_db.commit()
+                    # Periodic rollup (every hour)
+                    if time.time() - self._last_rollup > 3600:
+                        _rollup_daily_stats(self._history_db)
+                        self._last_rollup = time.time()
             except Exception:
                 log.exception("SQLite history recording failed")
 
@@ -2749,8 +2770,9 @@ class ClaudeBar(rumps.App):
                     self._auth_fail_count = 0
                     cookie_str = _auto_detect_cookies()
                     if cookie_str:
-                        self.config["cookie_str"] = cookie_str
-                        save_config(self.config)
+                        with self._config_lock:
+                            self.config["cookie_str"] = cookie_str
+                            save_config(self.config)
                         self._warned_pcts.clear()
                         log.info("Auth failed — auto-detected fresh cookies from browser")
                         self._schedule_fetch()
@@ -3045,20 +3067,37 @@ class ClaudeBar(rumps.App):
             "cursor_cookies":  _auto_detect_cursor_cookies,
         }
         for cfg_key in _COOKIE_PROVIDERS:
-            if not self.config.get(cfg_key):
+            with self._config_lock:
+                has_key = bool(self.config.get(cfg_key))
+            if not has_key:
                 detect_fn = _cookie_detectors.get(cfg_key)
                 if detect_fn:
                     ck = detect_fn()
                     if ck:
-                        self.config[cfg_key] = ck
-                        save_config(self.config)
+                        with self._config_lock:
+                            self.config[cfg_key] = ck
+                            save_config(self.config)
 
-        results = []
+        with self._config_lock:
+            keys_snapshot = {k: self.config.get(k) for k in PROVIDER_REGISTRY}
+        tasks = []
         for cfg_key, (name, fetch_fn) in PROVIDER_REGISTRY.items():
-            key = self.config.get(cfg_key)
+            key = keys_snapshot.get(cfg_key)
             if key:
-                results.append(fetch_fn(key))
-        self._provider_data = results
+                tasks.append((fetch_fn, key))
+        if tasks:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            results = []
+            with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+                futures = {pool.submit(fn, k): (fn, k) for fn, k in tasks}
+                for future in as_completed(futures):
+                    try:
+                        results.append(future.result())
+                    except Exception:
+                        log.exception("provider fetch failed")
+            self._provider_data = results
+        else:
+            self._provider_data = []
 
     # ── callbacks ─────────────────────────────────────────────────────────────
 
@@ -3325,10 +3364,12 @@ class ClaudeBar(rumps.App):
     def _toggle_login_item(self, sender):
         if _is_login_item():
             _remove_login_item()
+            self._login_item_cached = False
             sender._menuitem.setState_(0)
             _notify("Claude Usage Bar", "Removed from Login Items", "")
         else:
             _add_login_item()
+            self._login_item_cached = True
             sender._menuitem.setState_(1)
             _notify("Claude Usage Bar", "Added to Login Items", "Will launch automatically on login")
 
@@ -3366,8 +3407,9 @@ class ClaudeBar(rumps.App):
             log.exception("_auto_detect_cookies failed")
             cookie_str = None
         if cookie_str:
-            self.config["cookie_str"] = cookie_str
-            save_config(self.config)
+            with self._config_lock:
+                self.config["cookie_str"] = cookie_str
+                save_config(self.config)
             self._warned_pcts.clear()
             self._auth_fail_count = 0
             _notify("Claude Usage Bar", "Cookies auto-detected ✓", "Fetching usage data…")
@@ -3387,6 +3429,7 @@ def _cli_history():
         return
 
     conn = sqlite3.connect(HISTORY_DB)
+    conn.execute("PRAGMA journal_mode=WAL")
     keys = [r[0] for r in conn.execute(
         "SELECT DISTINCT key FROM daily_stats ORDER BY key"
     ).fetchall()]

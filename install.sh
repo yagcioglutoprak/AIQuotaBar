@@ -44,10 +44,12 @@ fi
 if [ -d "$INSTALL_DIR/.git" ]; then
   echo "  ↻  Updating existing install…"
   git -C "$INSTALL_DIR" fetch --quiet origin
-  git -C "$INSTALL_DIR" reset --hard origin/main --quiet
+  git -C "$INSTALL_DIR" stash --quiet 2>/dev/null || true
+  git -C "$INSTALL_DIR" checkout main --quiet 2>/dev/null || true
+  git -C "$INSTALL_DIR" merge --ff-only origin/main --quiet
 else
   echo "  ↓  Cloning repository…"
-  git clone --quiet "$REPO" "$INSTALL_DIR"
+  git clone --quiet --depth 1 "$REPO" "$INSTALL_DIR"
 fi
 
 # ── 4. Virtual environment + dependencies ─────────────────────────────────────
@@ -58,7 +60,7 @@ fi
 PYTHON="$VENV_DIR/bin/python3"
 echo "  ↓  Installing Python dependencies…"
 "$PYTHON" -m pip install --quiet --upgrade pip
-"$PYTHON" -m pip install --quiet --upgrade rumps curl_cffi browser-cookie3
+"$PYTHON" -m pip install --quiet --upgrade -r "$INSTALL_DIR/requirements.txt"
 echo "  ✓  Dependencies installed"
 
 # ── 5. LaunchAgent (run at login) ─────────────────────────────────────────────
@@ -88,6 +90,7 @@ cat > "$PLIST" <<PLIST_EOF
 PLIST_EOF
 
 launchctl bootout gui/$(id -u) "$PLIST" 2>/dev/null || true
+sleep 1
 launchctl bootstrap gui/$(id -u) "$PLIST"
 echo "  ✓  Added to Login Items (runs at every login)"
 

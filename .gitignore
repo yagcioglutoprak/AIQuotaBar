@@ -14,8 +14,7 @@ venv/
 env/
 
 # User data (contains session cookies — never commit!)
-~/.claude_bar_config.json
-*.json
+.claude_bar_config.json
 
 # Logs
 *.log
@@ -34,3 +33,12 @@ Icon?
 .idea/
 *.swp
 *.swo
+
+# Xcode build artifacts
+AIQuotaBarWidget/build/
+AIQuotaBarWidget/build_*/
+xcuserdata/
+*.xcuserstate
+
+# Distribution archives
+*.zip

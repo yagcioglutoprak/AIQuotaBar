@@ -1,17 +1,44 @@
-# CLAUDE.md — Claude Usage Bar
+# CLAUDE.md — AIQuotaBar
 
 ## Project goal
 
-**Reach as many Claude users as possible on GitHub.**
-Every change should make the app easier to install, more reliable, and more shareable.
-The north star metric is GitHub stars — driven by a great README, zero-friction install, and a working app.
+**Get maximum GitHub stars and widespread adoption.**
+North star: **225 stars** (threshold to resubmit homebrew-core PR).
+Every change must either (a) convert more visitors to stars, (b) bring new visitors, or (c) make the app so good people share it organically.
+
+### Current stats (2026-03-01)
+- 6 stars, 0 forks
+- Early stage — need to build real traction from scratch
+
+### Growth priorities (in order)
+1. **Fix star conversion** — README must convince in 5 seconds (hook → GIF → install)
+2. **Social proof loop** — HN/PH badges, testimonials, star count badge visible
+3. **Distribution** — awesome-lists, Reddit, dev.to, Twitter/X, YouTube demos
+4. **Shareability features** — screenshot/share menu item, referral nudges in-app
+5. **Cross-platform** — Linux tray port opens 70% more developers
+6. **SEO** — GitHub Pages landing page, proper meta tags, backlinks
+
+### Channel status
+| Channel | Status | Next action |
+|---------|--------|-------------|
+| HN | Show HN posted | Repost if no traction |
+| Product Hunt | Not submitted | Submit on a Tuesday 12:01 AM PST |
+| awesome-mac PR #1833 | Open | Follow up if stale >7d |
+| open-source-mac-os-apps PR #1041 | Open | Follow up if stale >7d |
+| awesome-claude PR #60 | Open | Follow up if stale >7d |
+| awesome-claude-code #888 | Auto-closed | Resubmit after 2026-03-05 |
+| Reddit r/ClaudeAI | Rejected once | Repost with value-first copy |
+| Reddit r/ChatGPT, r/macapps, r/commandline | Not posted | Post with screenshots |
+| AlternativeTo | Listed | Done |
+| dev.to | Published | Done |
+| Twitter/X | Not posted | Post demo GIF + install command |
+| GitHub Pages | Live | Improve SEO meta tags |
+| Homebrew core | Needs 225 stars | Blocked on stars |
+| Indie Hackers | Blocked (new account) | Build karma via comments |
 
 ## What this is
 
-A native macOS menu bar app (Python + rumps) that shows live Claude.ai usage limits.
-It reads cookies from the user's browser (no manual copy-paste), calls the private
-`claude.ai/api/organizations/{org}/usage` endpoint, and displays the result as a
-status bar icon (`🟢 4%`, `🟡 83%`, `🔴 100%`).
+A native macOS menu bar app (Python + rumps) that shows live Claude, ChatGPT, Cursor, and GitHub Copilot usage limits. It reads cookies from the user's browser (no manual copy-paste), calls provider APIs, and displays the result as a status bar icon (`🟢 4%`, `🟡 83%`, `🔴 100%`).
 
 ## Architecture
 
@@ -33,7 +60,7 @@ claude_bar.py
 
 A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the desktop.
 
-**Data flow:** `claude_bar.py` → `~/Library/Group Containers/group.com.aiquotabar/usage.json` → WidgetKit reads it.
+**Data flow:** `claude_bar.py` → `~/Library/Application Support/AIQuotaBar/usage.json` → WidgetKit reads it.
 
 - `_write_widget_cache()` runs after every fetch cycle (atomic write, never crashes main app)
 - Widget refreshes every 15 min via `TimelineProvider`
@@ -88,17 +115,33 @@ Response fields:
 
 ## Growth / virality rules
 
-- **README is a marketing page.** Keep the one-line install prominent at the top.
-  Never bury it below a wall of text.
-- **The demo GIF is the #1 driver of stars.** `assets/demo.gif` must exist and be compelling.
-  It should show: app launching → auto-detecting cookies → live percentage in menu bar.
+- **README is a landing page, not docs.** Hook → GIF → install command must be above the fold.
+  A visitor should understand value and install in under 10 seconds.
+- **The demo GIF is the #1 driver of stars.** `assets/demo.gif` must be short, polished, and show
+  the "aha moment": menu bar icon → click → full usage breakdown with colors.
 - **Zero-friction install is non-negotiable.**
   `curl -fsSL .../install.sh | bash` must work end-to-end without manual steps.
   If it breaks, fix it before anything else.
-- **Keep the README concise.** One install command, one screenshot, short feature list.
+- **Social proof converts.** Star count badge, download count, real testimonials — keep them visible.
+  Never fake stats. Only show real numbers.
+- **Every touchpoint should nudge stars.** Post-install terminal message, in-app menu item,
+  GitHub Pages landing page — all link back to the repo.
+- **Keep the README concise.** One install command, one GIF, short feature list.
   Long docs belong in a wiki, not the README.
 - **GitHub topics to maintain** (set via repo Settings → About):
-  `claude`, `anthropic`, `macos`, `menu-bar`, `usage-monitor`, `menubar-app`, `claude-ai`
+  `claude`, `anthropic`, `macos`, `menu-bar`, `usage-monitor`, `menubar-app`, `claude-ai`,
+  `chatgpt`, `cursor`, `copilot`, `rate-limit`, `ai-tools`
+
+## High-impact features to build (star drivers)
+
+These features would make the app significantly more shareable:
+
+1. **Gemini support** — Google's API has usage limits too; huge user base
+2. **Linux system tray** — opens the app to 70% more developers (use pystray)
+3. **Usage history chart** — "see your AI usage over time" is a compelling screenshot
+4. **Share/export** — one-click screenshot of usage to clipboard (instant Twitter content)
+5. **Claude Code / CLI tracking** — devs using Claude Code want to see limits too
+6. **Notification Center widget** — already have WidgetKit, expose in NC for more visibility
 
 ## Dev workflow
 
@@ -123,4 +166,5 @@ pkill -f claude_bar.py; sleep 1; python3 claude_bar.py &
 - Do not call `rumps.notification()` directly — always use `_notify()`.
 - Do not store cookies in plaintext anywhere other than `~/.claude_bar_config.json` (which is gitignored).
 - Do not add Electron, a web server, or any always-on background process beyond the menu bar app itself.
-- Do not make the README longer — keep it short and punchy for maximum conversion to stars.
+- Do not make the README longer than it already is — trim if anything.
+- Do not add features that don't drive stars or retention. Every line of code should serve growth.
