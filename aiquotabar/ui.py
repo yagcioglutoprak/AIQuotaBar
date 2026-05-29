@@ -2292,10 +2292,22 @@ class ClaudeBar(rumps.App):
             data = self._ui_pending_data
             self._ui_pending_title = None
             self._ui_pending_data = None
-        if data is not None:
-            self._apply(data)
-        elif title is not None:
-            self.title = title
+        try:
+            if data is not None:
+                self._apply(data)
+            elif title is not None:
+                self.title = title
+        except Exception:
+            # This ticker is the ONLY main-thread callback that mutates the
+            # status item. An unhandled exception here escapes into the rumps
+            # run loop, which can silently stop the timer: the process keeps
+            # running but the menu bar item freezes or disappears with no
+            # trace in the log. Catch and log it so the bar survives and any
+            # future vanish is always diagnosable.
+            log.exception(
+                "_flush_ui failed to apply UI update (data=%s, title=%r)",
+                "yes" if data is not None else "no", title,
+            )
 
     # -- widget ---------------------------------------------------------------
 
@@ -2786,10 +2798,25 @@ class ClaudeBar(rumps.App):
                 seg.addAttribute_value_range_(NSForegroundColorAttributeName, cc_color, (3, 2))
                 s.appendAttributedString_(seg)
 
+            rendered = str(s.string())
+            if not rendered.strip():
+                # An empty attributed title makes the status item collapse to
+                # nothing -- the classic "process alive but icon gone" state.
+                # Surface it instead of silently blanking the bar.
+                log.warning(
+                    "bar title is empty (segments=%r, cc_msgs=%r) -- "
+                    "status item would be invisible; using fallback marker",
+                    provider_segments, cc_msgs,
+                )
+                self._nsapp.nsstatusitem.setAttributedTitle_(
+                    NSAttributedString.alloc().initWithString_("◆")
+                )
+                return
             self._nsapp.nsstatusitem.setAttributedTitle_(s)
+            log.debug("bar title set: %r", rendered)
             return
         except Exception as e:
-            log.debug("_set_bar_title failed: %s", e)
+            log.exception("_set_bar_title failed: %s", e)
         # Plain-text fallback
         parts = []
         for name, pct, suffix in provider_segments:
@@ -2847,6 +2874,7 @@ class ClaudeBar(rumps.App):
 
             self._set_bar_title(segments, cc_msgs=cc_msgs)
         else:
+            log.debug("_apply: no claude segments -- showing bare marker")
             self.title = "\u25c6"
         self._rebuild_menu(data)
         # Refresh the floating panel if it's currently visible
