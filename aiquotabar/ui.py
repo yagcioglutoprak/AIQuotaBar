@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from aiquotabar.config import (
     log, load_config, save_config, notif_enabled, set_notif,
     REFRESH_INTERVALS, DEFAULT_REFRESH,
+    CLAUDE_BAR_METRICS, DEFAULT_CLAUDE_BAR_METRICS,
     WARN_THRESHOLD, CRIT_THRESHOLD, PACING_ALERT_MINUTES,
     UPDATE_CHECK_INTERVAL, HISTORY_COLORS,
     WIDGET_CACHE_DIR,
@@ -2193,6 +2194,22 @@ class ClaudeBar(rumps.App):
             callback=self._bar_reset_auto,
         )
         bar_menu.add(auto_item)
+
+        # -- Claude limits shown in the bar (multi-select) --
+        bar_menu.add(None)
+        claude_menu = rumps.MenuItem("Claude Limits")
+        cur_metrics = self.config.get("claude_bar_metrics") or DEFAULT_CLAUDE_BAR_METRICS
+        for mkey, (mlabel, _tag) in CLAUDE_BAR_METRICS.items():
+            mi = rumps.MenuItem(mlabel, callback=self._make_claude_metric_toggle_cb(mkey))
+            mi._menuitem.setState_(1 if mkey in cur_metrics else 0)
+            claude_menu.add(mi)
+        bar_menu.add(claude_menu)
+
+        # -- Claude Code message count (the ◆ N segment) --
+        cc_item = rumps.MenuItem("Claude Code Messages", callback=self._toggle_cc_messages)
+        cc_item._menuitem.setState_(1 if self.config.get("show_cc_messages", True) else 0)
+        bar_menu.add(cc_item)
+
         items.append(bar_menu)
 
         # Refresh interval submenu
@@ -2727,12 +2744,16 @@ class ClaudeBar(rumps.App):
         "Copilot": {"icon": "copilot.png",            "tint": "#8CBFF3", "color": "#8CBFF3", "sym": "\u25c6"},
     }
 
-    def _set_bar_title(self, provider_segments: list[tuple[str, int, str]],
+    def _set_bar_title(self, provider_segments: list[tuple[str, int, str, str]],
                        cc_msgs: int | None = None):
         """Multi-indicator attributed title with brand logo icons.
 
-        provider_segments: list of (provider_name, pct, extra_suffix)
-          e.g. [("Claude", 36, " \u00b7"), ("ChatGPT", 12, "")]
+        provider_segments: list of (provider_name, pct, extra_suffix, tag)
+          e.g. [("Claude", 36, "", ""), ("Claude", 52, "", "7d")]
+        `tag` is a compact window label (smaller font) rendered before the
+        percentage so multiple limits for the same provider stay
+        distinguishable. The provider icon is drawn once per consecutive run
+        of the same provider.
 
         Falls back to colored text symbols if AppKit / icons unavailable.
         """
@@ -2749,33 +2770,60 @@ class ClaudeBar(rumps.App):
 
             font = NSFont.menuBarFontOfSize_(0)
             base = {NSFontAttributeName: font} if font else {}
+            # Smaller font for window tags (e.g. "7d") so they read as secondary.
+            # We deliberately do NOT set an explicit colour: an explicit colour
+            # breaks the menu bar's automatic light/dark vibrancy and renders
+            # muddy/low-contrast. The smaller size alone de-emphasises the tag
+            # while it keeps the crisp adaptive text colour of the rest.
+            tag_attrs = base
+            try:
+                if font:
+                    small = NSFont.menuBarFontOfSize_(max(10.0, font.pointSize() * 0.85))
+                    if small:
+                        tag_attrs = {NSFontAttributeName: small}
+            except Exception:
+                pass
 
             s = NSMutableAttributedString.alloc().initWithString_("",)
 
-            for i, (name, pct, suffix) in enumerate(provider_segments):
+            prev_name = None
+            for i, (name, pct, suffix, tag) in enumerate(provider_segments):
                 cfg = self._BAR_PROVIDERS.get(name, {})
-                color_hex = cfg.get("color", "#AAAAAA")
-                color = _rgb(color_hex)
+                color = _rgb(cfg.get("color", "#AAAAAA"))
+                same_provider = name == prev_name
 
                 if i > 0:
+                    # Tight gap between a provider's own limits, wider between providers
+                    gap = " " if same_provider else "   "
                     s.appendAttributedString_(
-                        NSAttributedString.alloc().initWithString_attributes_("   ", base)
+                        NSAttributedString.alloc().initWithString_attributes_(gap, base)
                     )
 
-                icon_file = cfg.get("icon")
-                tint = cfg.get("tint")
-                img = _bar_icon(icon_file, tint_hex=tint) if icon_file else None
-                if img:
-                    s.appendAttributedString_(_icon_astr(img, base))
-                else:
-                    sym = cfg.get("sym", "\u25cf")
-                    seg = NSMutableAttributedString.alloc().initWithString_attributes_(f"{sym} ", base)
-                    seg.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(sym)))
-                    s.appendAttributedString_(seg)
+                # Provider icon/symbol only on the first segment of a run
+                if not same_provider:
+                    icon_file = cfg.get("icon")
+                    img = _bar_icon(icon_file, tint_hex=cfg.get("tint")) if icon_file else None
+                    if img:
+                        s.appendAttributedString_(_icon_astr(img, base))
+                    else:
+                        sym = cfg.get("sym", "\u25cf")
+                        symseg = NSMutableAttributedString.alloc().initWithString_attributes_(f"{sym} ", base)
+                        symseg.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(sym)))
+                        s.appendAttributedString_(symseg)
 
-                s.appendAttributedString_(
-                    NSAttributedString.alloc().initWithString_attributes_(f" {pct}%{suffix}", base)
-                )
+                # Compact window tag (e.g. "7d") in a smaller font, when present
+                if tag:
+                    s.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_(f" {tag} ", tag_attrs)
+                    )
+                    s.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_(f"{pct}%{suffix}", base)
+                    )
+                else:
+                    s.appendAttributedString_(
+                        NSAttributedString.alloc().initWithString_attributes_(f" {pct}%{suffix}", base)
+                    )
+                prev_name = name
 
             # -- Claude Code  diamond 3.2k --
             if cc_msgs is not None and cc_msgs > 0:
@@ -2792,10 +2840,14 @@ class ClaudeBar(rumps.App):
             log.debug("_set_bar_title failed: %s", e)
         # Plain-text fallback
         parts = []
-        for name, pct, suffix in provider_segments:
+        prev_name = None
+        for name, pct, suffix, tag in provider_segments:
             cfg = self._BAR_PROVIDERS.get(name, {})
             sym = cfg.get("sym", "\u25cf")
-            parts.append(f"{sym} {pct}%{suffix}")
+            prefix = "" if name == prev_name else f"{sym} "
+            tagstr = f"{tag} " if tag else ""
+            parts.append(f"{prefix}{tagstr}{pct}%{suffix}")
+            prev_name = name
         if cc_msgs is not None and cc_msgs > 0:
             parts.append(f"\u25c6 {_fmt_count(cc_msgs)}")
         self.title = "  ".join(parts)
@@ -2814,35 +2866,78 @@ class ClaudeBar(rumps.App):
     # Priority order for the 2 bar slots (highest first)
     _BAR_PRIORITY = ["Claude", "ChatGPT", "Cursor", "Copilot"]
 
-    def _apply(self, data: UsageData):
-        primary = data.session or data.weekly_all or data.weekly_sonnet
-        if primary:
-            weekly_maxed = any(
-                r and r.pct >= CRIT_THRESHOLD
-                for r in [data.weekly_all, data.weekly_sonnet]
-            )
-            extra = " \u00b7" if (weekly_maxed and primary is data.session
-                             and primary.pct < CRIT_THRESHOLD) else ""
+    def _claude_bar_segments(self, data: UsageData) -> list[tuple[str, int, str, str]]:
+        """Build the Claude menu-bar segments from the selected metrics.
 
-            # Collect all available segments
-            available: dict[str, tuple[str, int, str]] = {}
-            available["Claude"] = ("Claude", primary.pct, extra)
+        Returns a list of (name, pct, suffix, tag) tuples -- one per Claude
+        limit the user has chosen to show (config["claude_bar_metrics"]) that
+        actually has data. `tag` is a compact window label (e.g. "5h", "7d")
+        that only appears when two or more limits are shown, so they stay
+        distinguishable; a single limit renders as a bare percentage.
+        """
+        metrics = self.config.get("claude_bar_metrics") or DEFAULT_CLAUDE_BAR_METRICS
+        rows = {
+            "session":       data.session,
+            "weekly":        data.weekly_all,
+            "weekly_sonnet": data.weekly_sonnet,
+        }
+        # Whether any weekly limit is shown as its own segment -- if so, the
+        # legacy "session fine but weekly maxed" dot hint is redundant.
+        weekly_shown = any(
+            m in ("weekly", "weekly_sonnet") and rows.get(m) is not None
+            for m in metrics
+        )
+        segments: list[tuple[str, int, str, str]] = []
+        for key in CLAUDE_BAR_METRICS:           # canonical order
+            if key not in metrics:
+                continue
+            row = rows.get(key)
+            if row is None:
+                continue
+            _label, tag = CLAUDE_BAR_METRICS[key]
+            suffix = ""
+            if key == "session" and not weekly_shown:
+                weekly_maxed = any(
+                    r and r.pct >= CRIT_THRESHOLD
+                    for r in (data.weekly_all, data.weekly_sonnet)
+                )
+                if weekly_maxed and row.pct < CRIT_THRESHOLD:
+                    suffix = " \u00b7"
+            segments.append(("Claude", row.pct, suffix, tag))
+        # Fallback: chosen metrics had no data -> original behaviour.
+        if not segments:
+            primary = data.session or data.weekly_all or data.weekly_sonnet
+            if primary:
+                segments.append(("Claude", primary.pct, "", ""))
+        # Tags only disambiguate when 2+ limits show; a lone limit is bare.
+        if len(segments) == 1:
+            name, pct, suffix, _tag = segments[0]
+            segments[0] = (name, pct, suffix, "")
+        return segments
+
+    def _apply(self, data: UsageData):
+        claude_segments = self._claude_bar_segments(data)
+        if claude_segments:
+            # Collect available segments per provider (Claude may have several).
+            available: dict[str, list[tuple[str, int, str, str]]] = {
+                "Claude": claude_segments,
+            }
             for pd in self._provider_data:
                 bar_pct = self._provider_bar_pct(pd)
                 if bar_pct is not None:
-                    available[pd.name] = (pd.name, bar_pct, "")
+                    available[pd.name] = [(pd.name, bar_pct, "", "")]
 
             # User-configured bar providers, or auto top 2 by priority
             chosen = self.config.get("bar_providers")
             if chosen:
-                segments = [available[n] for n in chosen if n in available]
+                names = [n for n in chosen if n in available]
             else:
-                segments = [available[n] for n in self._BAR_PRIORITY
-                            if n in available][:2]
+                names = [n for n in self._BAR_PRIORITY if n in available][:2]
+            segments = [seg for n in names for seg in available[n]]
 
-            # Claude Code weekly messages
+            # Claude Code weekly messages (optional -- defaults on)
             cc_msgs: int | None = None
-            if self._cc_stats:
+            if self.config.get("show_cc_messages", True) and self._cc_stats:
                 cc_msgs = self._cc_stats.get("week_messages")
 
             self._set_bar_title(segments, cc_msgs=cc_msgs)
@@ -3112,6 +3207,36 @@ class ClaudeBar(rumps.App):
         self.config.pop("bar_providers", None)
         save_config(self.config)
         self._rebuild_menu(self._last_data)
+        if self._last_data:
+            self._apply(self._last_data)
+
+    def _make_claude_metric_toggle_cb(self, metric: str):
+        """Toggle a Claude limit (session / weekly / weekly_sonnet) in the bar."""
+        def _cb(_sender):
+            metrics = list(self.config.get("claude_bar_metrics")
+                           or DEFAULT_CLAUDE_BAR_METRICS)
+            if metric in metrics:
+                metrics.remove(metric)
+            else:
+                metrics.append(metric)
+            # Never leave the bar with no Claude limit; fall back to the default.
+            if not metrics:
+                metrics = list(DEFAULT_CLAUDE_BAR_METRICS)
+            # Keep canonical order so segments render session -> weekly -> sonnet.
+            metrics = [k for k in CLAUDE_BAR_METRICS if k in metrics]
+            self.config["claude_bar_metrics"] = metrics
+            save_config(self.config)
+            self._rebuild_menu(self._last_data)
+            if self._last_data:
+                self._apply(self._last_data)
+        return _cb
+
+    def _toggle_cc_messages(self, sender):
+        """Toggle the Claude Code weekly message count (the ◆ N bar segment)."""
+        show = not self.config.get("show_cc_messages", True)
+        self.config["show_cc_messages"] = show
+        save_config(self.config)
+        sender._menuitem.setState_(1 if show else 0)
         if self._last_data:
             self._apply(self._last_data)
 
