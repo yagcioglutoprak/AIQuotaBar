@@ -934,7 +934,11 @@ def _add_login_item():
         "ProgramArguments": [python_exe, path],
         "WorkingDirectory": os.path.dirname(path),
         "RunAtLoad": True,
-        "KeepAlive": False,
+        # Crash-only restart: launchd relaunches the app if it dies
+        # unexpectedly, but a clean quit (Quit menu item -> exit 0) stays
+        # quit. Avoids "process died, no icon until next login" without
+        # fighting an intentional quit.
+        "KeepAlive": {"SuccessfulExit": False},
         "StandardOutPath": log_path,
         "StandardErrorPath": log_path,
     }
