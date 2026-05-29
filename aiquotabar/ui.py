@@ -899,7 +899,16 @@ def _section_header_mi(title: str, icon_filename: str | None,
 # -- login item helpers --------------------------------------------------------
 
 def _script_path() -> str:
-    return os.path.abspath(__file__)
+    """Path to the launchable entry point for the LaunchAgent.
+
+    Launching ``aiquotabar/ui.py`` directly fails with ModuleNotFoundError:
+    Python puts the script's own dir (the package dir) on sys.path, not the
+    repo root, so ``import aiquotabar.*`` breaks. The repo-root
+    ``claude_bar.py`` shim sets the path up correctly, so prefer it.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shim = os.path.join(repo_root, "claude_bar.py")
+    return shim if os.path.exists(shim) else os.path.abspath(__file__)
 
 
 def _is_login_item() -> bool:
@@ -919,11 +928,15 @@ def _add_login_item():
     path = _script_path()
     plist = os.path.expanduser("~/Library/LaunchAgents/com.claudebar.plist")
     python_exe = sys.executable
+    log_path = os.path.expanduser("~/.claude_bar.log")
     plist_data = {
         "Label": "com.claudebar",
         "ProgramArguments": [python_exe, path],
+        "WorkingDirectory": os.path.dirname(path),
         "RunAtLoad": True,
         "KeepAlive": False,
+        "StandardOutPath": log_path,
+        "StandardErrorPath": log_path,
     }
     with open(plist, "wb") as f:
         plistlib.dump(plist_data, f)
