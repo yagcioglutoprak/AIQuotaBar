@@ -2247,18 +2247,26 @@ class ClaudeBar(rumps.App):
         login_item._menuitem.setState_(1 if self._is_login_item_cached() else 0)
         items.append(login_item)
 
-        # Desktop Widget status
+        # Desktop Widget submenu: enable/disable + status/setup
+        widget_menu = rumps.MenuItem("Desktop Widget")
+        widget_on = self.config.get("widget_enabled", True)
+        enable_item = rumps.MenuItem(
+            "Enable Desktop Widget", callback=self._toggle_widget_enabled,
+        )
+        enable_item._menuitem.setState_(1 if widget_on else 0)
+        widget_menu.add(enable_item)
+        widget_menu.add(None)
         if _is_widget_installed():
-            widget_item = rumps.MenuItem(
-                "Desktop Widget  \u2713  Installed",
+            widget_menu.add(rumps.MenuItem(
+                "Open Widget Setup\u2026  \u2713  Installed",
                 callback=self._open_widget_settings,
-            )
+            ))
         else:
-            widget_item = rumps.MenuItem(
-                "Desktop Widget  \u00b7  Not Installed",
+            widget_menu.add(rumps.MenuItem(
+                "Install Widget\u2026  \u00b7  Not Installed",
                 callback=self._install_widget_prompt,
-            )
-        items.append(widget_item)
+            ))
+        items.append(widget_menu)
 
         items.append(None)
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
@@ -2421,6 +2429,29 @@ class ClaudeBar(rumps.App):
                     ),
                     sound=False,
                 )
+
+    def _toggle_widget_enabled(self, sender):
+        """Enable/disable the desktop widget integration.
+
+        When disabled we stop nudging the host app on every refresh, so its
+        onboarding window never reappears in the background. We also quit any
+        running host instance so the window goes away immediately. Re-enabling
+        resumes the background widget refreshes.
+        """
+        enabled = not self.config.get("widget_enabled", True)
+        self.config["widget_enabled"] = enabled
+        save_config(self.config)
+        sender._menuitem.setState_(1 if enabled else 0)
+        if not enabled:
+            subprocess.Popen(
+                ["osascript", "-e", 'quit app "AIQuotaBarHost"'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        elif self._last_data:
+            # Re-enabled: push a fresh cache + reload right away.
+            _write_widget_cache(
+                self._last_data, self._provider_data, self._cc_stats, self.config,
+            )
 
     def _open_widget_settings(self, _sender):
         """Open the widget host app (shows add-widget instructions)."""

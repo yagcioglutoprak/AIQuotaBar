@@ -119,11 +119,14 @@ def _write_widget_cache(
         os.replace(tmp, WIDGET_CACHE_FILE)
         log.debug("widget cache written: %s", WIDGET_CACHE_FILE)
 
-        # Nudge WidgetKit to reload (non-blocking, best-effort)
-        subprocess.Popen(
-            ["open", "-g", "-a", "AIQuotaBarHost", "--args", "--reload-widget"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # Nudge WidgetKit to reload (non-blocking, best-effort). Skipped when the
+        # user has turned the desktop widget off, so we never launch the host app
+        # (and its onboarding window) in the background.
+        if (config or {}).get("widget_enabled", True):
+            subprocess.Popen(
+                ["open", "-g", "-a", "AIQuotaBarHost", "--args", "--reload-widget"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
     except Exception:
         log.debug("_write_widget_cache failed", exc_info=True)
 
