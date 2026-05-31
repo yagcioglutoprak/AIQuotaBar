@@ -527,10 +527,10 @@ BROWSERS = [
 ]
 
 # Collect candidates from every browser that has the target cookie.
-# Pick the one with the latest expiry on the target cookie so we always
-# use the freshest session (handles the case where the user is logged in
-# to multiple browsers simultaneously).
-candidates = []  # list of (expires, cookie_str)
+# Rank by expiry as a hint, but the caller VALIDATES each candidate and
+# uses the first that actually authenticates -- a stale session in one
+# browser must never mask a valid one in another.
+candidates = []  # list of (expires_seconds, cookie_str)
 
 try:
     import browser_cookie3
@@ -544,6 +544,16 @@ try:
             if target not in cookies:
                 continue
             expires = cookies[target].expires or 0
+            # Normalize expiry to seconds. Firefox can report the value in
+            # milliseconds (or an overflowed scale), which made a stale
+            # session always out-rank a valid Chromium one. Anything past
+            # year ~5138 in seconds (1e11) is treated as milliseconds.
+            try:
+                expires = float(expires)
+            except (TypeError, ValueError):
+                expires = 0.0
+            while expires > 1e11:
+                expires /= 1000.0
             cookie_str = '; '.join(f'{k}={c.value}' for k, c in cookies.items())
             candidates.append((expires, cookie_str))
         except Exception:
@@ -551,18 +561,20 @@ try:
 except Exception:
     pass
 
-# Best = latest expiry; tie-break by longest cookie string (richest jar)
-result = None
-if candidates:
-    candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
-    result = candidates[0][1]
+# Rank best-first: latest (normalized) expiry, tie-break by richest jar.
+candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
+result = [c[1] for c in candidates]
 
 print(json.dumps(result))
 """
 
 
-def _run_cookie_detection(domain: str, target_cookie: str) -> str | None:
-    """Run browser_cookie3 in an isolated child process (crash-safe)."""
+def _run_cookie_detection(domain: str, target_cookie: str) -> list[str]:
+    """Run browser_cookie3 in an isolated child process (crash-safe).
+
+    Returns a best-first ranked list of candidate cookie strings (one per
+    browser that has the target cookie). Empty list if none are found.
+    """
     try:
         r = subprocess.run(
             [sys.executable, "-c", _DETECT_SCRIPT, domain, target_cookie],
@@ -571,36 +583,75 @@ def _run_cookie_detection(domain: str, target_cookie: str) -> str | None:
         log.debug("cookie-detect rc=%d out=%r err=%r",
                   r.returncode, r.stdout[:200], r.stderr[:200])
         if r.stdout.strip():
-            return json.loads(r.stdout.strip())
+            data = json.loads(r.stdout.strip())
+            if isinstance(data, list):
+                return [c for c in data if c]
+            if isinstance(data, str):   # backward-compat with old single result
+                return [data]
     except Exception as e:
         log.debug("_run_cookie_detection failed: %s", e)
-    return None
+    return []
+
+
+def _claude_cookie_is_valid(cookie_str: str) -> bool:
+    """True if this cookie string authenticates against claude.ai.
+
+    Probes /api/organizations (session-level, no org id needed). A stale or
+    logged-out sessionKey returns 403 account_session_invalid here, so this
+    cleanly rejects dead sessions that still carry a far-future expiry.
+    """
+    try:
+        _get("https://claude.ai/api/organizations", parse_cookie_string(cookie_str))
+        return True
+    except Exception as e:
+        log.debug("claude cookie candidate rejected: %s", e)
+        return False
 
 
 def _auto_detect_cookies() -> str | None:
-    """Detect claude.ai session cookies from the browser (crash-safe subprocess)."""
+    """Detect a *valid* claude.ai session cookie from the browser.
+
+    Returns the first candidate (across all logged-in browsers) that actually
+    authenticates, instead of blindly trusting the latest-expiry one. This
+    stops a stale session in one browser (e.g. an old Firefox login whose
+    cookie still has a far-future expiry) from masking a valid session in
+    another (e.g. a fresh Chrome login).
+    """
     if not _BROWSER_COOKIE3_OK:
         return None
     _warn_keychain_once()
-    return _run_cookie_detection("claude.ai", "sessionKey")
+    candidates = _run_cookie_detection("claude.ai", "sessionKey")
+    if not candidates:
+        return None
+    for cookie_str in candidates:
+        if _claude_cookie_is_valid(cookie_str):
+            return cookie_str
+    # Nothing validated (all logged out / expired). Fall back to the
+    # best-ranked candidate so the existing 401/403 handling can surface a
+    # "session expired" prompt to the user.
+    log.debug("no claude cookie candidate validated; using best-ranked")
+    return candidates[0]
 
 
 def _auto_detect_chatgpt_cookies() -> str | None:
     """Detect chatgpt.com session cookies from the browser (crash-safe subprocess)."""
     if not _BROWSER_COOKIE3_OK:
         return None
-    return _run_cookie_detection("chatgpt.com", "__Secure-next-auth.session-token")
+    cands = _run_cookie_detection("chatgpt.com", "__Secure-next-auth.session-token")
+    return cands[0] if cands else None
 
 
 def _auto_detect_copilot_cookies() -> str | None:
     """Detect github.com session cookies from the browser (crash-safe subprocess)."""
     if not _BROWSER_COOKIE3_OK:
         return None
-    return _run_cookie_detection("github.com", "user_session")
+    cands = _run_cookie_detection("github.com", "user_session")
+    return cands[0] if cands else None
 
 
 def _auto_detect_cursor_cookies() -> str | None:
     """Detect cursor.com session cookies from the browser (crash-safe subprocess)."""
     if not _BROWSER_COOKIE3_OK:
         return None
-    return _run_cookie_detection("cursor.com", "WorkosCursorSessionToken")
+    cands = _run_cookie_detection("cursor.com", "WorkosCursorSessionToken")
+    return cands[0] if cands else None

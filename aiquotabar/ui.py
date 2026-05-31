@@ -2394,32 +2394,29 @@ class ClaudeBar(rumps.App):
                 _show_welcome_window(gif_path, widget_ok)
             else:
                 # Fallback to notification if GIF missing
-                rumps.notification(
-                    title="Welcome to AIQuotaBar",
-                    subtitle="Monitoring Claude + ChatGPT usage",
-                    message="Click the diamond in your menu bar to get started.",
-                    sound=True,
+                _notify(
+                    "Welcome to AIQuotaBar",
+                    "Monitoring Claude + ChatGPT usage",
+                    "Click the diamond in your menu bar to get started.",
                 )
             self.config["seen_welcome"] = True
             save_config(self.config)
         else:
             # Subsequent launches -- brief notification
             if widget_ok:
-                rumps.notification(
-                    title="AIQuotaBar",
-                    subtitle="Running",
-                    message="Menu bar and desktop widget are synced.",
-                    sound=False,
+                _notify(
+                    "AIQuotaBar",
+                    "Running",
+                    "Menu bar and desktop widget are synced.",
                 )
             else:
-                rumps.notification(
-                    title="AIQuotaBar",
-                    subtitle="Running",
-                    message=(
+                _notify(
+                    "AIQuotaBar",
+                    "Running",
+                    (
                         "Tracking usage from your menu bar. "
-                        "A desktop widget is also available \u2014 check the menu."
+                        "A desktop widget is also available, check the menu."
                     ),
-                    sound=False,
                 )
 
     def _open_widget_settings(self, _sender):
