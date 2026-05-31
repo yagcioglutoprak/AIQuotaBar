@@ -899,7 +899,14 @@ def _section_header_mi(title: str, icon_filename: str | None,
 # -- login item helpers --------------------------------------------------------
 
 def _script_path() -> str:
-    return os.path.abspath(__file__)
+    # The LaunchAgent must launch the package entry shim, not this module
+    # file: `python3 .../aiquotabar/ui.py` fails (the aiquotabar package is
+    # not importable that way and ui.py has no __main__ guard). claude_bar.py
+    # lives at the repo root and puts that root on sys.path so the package
+    # resolves. Fall back to this file only if the shim is somehow missing.
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    shim = os.path.join(root, "claude_bar.py")
+    return shim if os.path.exists(shim) else os.path.abspath(__file__)
 
 
 def _is_login_item() -> bool:
@@ -923,7 +930,13 @@ def _add_login_item():
         "Label": "com.claudebar",
         "ProgramArguments": [python_exe, path],
         "RunAtLoad": True,
-        "KeepAlive": False,
+        # Respawn only on an abnormal exit (crash / killed by signal); a
+        # clean Quit (exit 0) stays quit. _restart_app() uses os.execv, which
+        # replaces the process in place (same PID, no exit), so the
+        # self-updater never trips a launchd respawn.
+        "KeepAlive": {"SuccessfulExit": False},
+        "StandardOutPath": os.path.expanduser("~/.claude_bar.log"),
+        "StandardErrorPath": os.path.expanduser("~/.claude_bar.log"),
     }
     with open(plist, "wb") as f:
         plistlib.dump(plist_data, f)

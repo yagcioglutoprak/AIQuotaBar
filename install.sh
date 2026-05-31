@@ -80,7 +80,10 @@ cat > "$PLIST" <<PLIST_EOF
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <false/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>StandardOutPath</key>
     <string>$HOME/.claude_bar.log</string>
     <key>StandardErrorPath</key>
