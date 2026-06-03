@@ -2305,10 +2305,156 @@ class ClaudeBar(rumps.App):
             data = self._ui_pending_data
             self._ui_pending_title = None
             self._ui_pending_data = None
-        if data is not None:
-            self._apply(data)
-        elif title is not None:
-            self.title = title
+        try:
+            if data is not None:
+                self._apply(data)
+            elif title is not None:
+                self.title = title
+        except Exception:
+            # This ticker is the ONLY main-thread callback that mutates the
+            # status item. An unhandled exception here escapes into the rumps
+            # run loop, which can silently stop the timer: the process keeps
+            # running but the menu bar item freezes or disappears with no
+            # trace in the log. Catch and log it so the bar survives and any
+            # future vanish is always diagnosable.
+            log.exception(
+                "_flush_ui failed to apply UI update (data=%s, title=%r)",
+                "yes" if data is not None else "no", title,
+            )
+        # Self-heal check runs every tick, independent of pending updates.
+        self._watchdog_tick()
+
+    # -- status-item self-heal watchdog ---------------------------------------
+    #
+    # Failure mode: the menu-bar NSStatusItem silently goes invisible while the
+    # process keeps running. setAttributedTitle_ still succeeds (the object is
+    # alive), so no exception is raised and the _flush_ui / _set_bar_title
+    # guards never trip -- the app cheerfully logs "bar title set" into the
+    # void. macOS reaches this state by flipping the item's `visible` flag off,
+    # collapsing its length to 0, or detaching the button from the status-bar
+    # window (seen across sleep/wake and display reconfiguration). The only
+    # recovery used to be a manual relaunch. This watchdog probes for the
+    # orphaned state on the main-thread ticker and rebuilds the item, logging
+    # every heal so the trigger becomes visible in ~/.claude_bar.log.
+
+    def _status_item_health(self):
+        """Return (healthy: bool, reason: str) for the menu-bar status item.
+
+        Probes the three ways the item goes invisible-while-alive: missing
+        item/button, system-hidden (visible flag off), a detached button (no
+        host window), or a collapsed (zero-length) item.
+        """
+        si = getattr(self._nsapp, "nsstatusitem", None)
+        if si is None:
+            return False, "nsstatusitem is None"
+        btn = si.button()
+        if btn is None:
+            return False, "button() is None"
+        try:
+            if hasattr(si, "isVisible") and not si.isVisible():
+                return False, "isVisible() is False"
+        except Exception:
+            pass
+        try:
+            if btn.window() is None:
+                return False, "button detached (no host window)"
+        except Exception:
+            pass
+        try:
+            if si.length() == 0:
+                return False, "length is 0 (collapsed)"
+        except Exception:
+            pass
+        return True, "ok"
+
+    def _reapply_last_title(self):
+        """Redraw the bar from the last rendered segments, or a visible marker."""
+        segs = getattr(self, "_last_title_segments", None)
+        if segs:
+            self._set_bar_title(segs, cc_msgs=getattr(self, "_last_cc_msgs", None))
+        else:
+            try:
+                from Foundation import NSAttributedString
+                self._nsapp.nsstatusitem.setAttributedTitle_(
+                    NSAttributedString.alloc().initWithString_("◆"))
+            except Exception:
+                self.title = "◆"
+
+    def _reassert_status_item(self, reason: str):
+        """Bring a vanished status item back. Escalates: un-hide + reset length
+        + re-render; if the button is still detached, fully recreate the item
+        via NSStatusBar and re-hook it. A 60s cooldown guards the recreate path
+        so a persistently-hostile system can't trigger a tight rebuild loop."""
+        from AppKit import NSStatusBar
+        NSVariableStatusItemLength = -1.0
+        log.warning("status item unhealthy (%s) -- self-healing", reason)
+        try:
+            si = getattr(self._nsapp, "nsstatusitem", None)
+            # Step 1: cheap fixes for the common cases (hidden / collapsed).
+            if si is not None:
+                try:
+                    if hasattr(si, "setVisible_"):
+                        si.setVisible_(True)
+                except Exception:
+                    log.debug("setVisible_ failed", exc_info=True)
+                try:
+                    si.setLength_(NSVariableStatusItemLength)
+                except Exception:
+                    log.debug("setLength_ failed", exc_info=True)
+                self._reapply_last_title()
+
+            # Step 2: if the button is still detached, recreate from scratch.
+            si = getattr(self._nsapp, "nsstatusitem", None)
+            detached = si is None
+            if si is not None:
+                btn = si.button()
+                try:
+                    detached = btn is None or btn.window() is None
+                except Exception:
+                    detached = btn is None
+            if detached:
+                if time.time() - getattr(self, "_last_recreate_ts", 0.0) < 60:
+                    log.warning("status item still detached -- recreate "
+                                "suppressed by 60s cooldown")
+                else:
+                    self._last_recreate_ts = time.time()
+                    log.warning("status item still detached -- recreating it")
+                    old = si
+                    new = NSStatusBar.systemStatusBar().statusItemWithLength_(
+                        NSVariableStatusItemLength)
+                    new.setHighlightMode_(True)
+                    self._nsapp.nsstatusitem = new   # Python attr retains it
+                    if old is not None:
+                        try:
+                            NSStatusBar.systemStatusBar().removeStatusItem_(old)
+                        except Exception:
+                            log.debug("removeStatusItem_ failed", exc_info=True)
+                    # Re-hook click handler and restore title on the new item.
+                    self._hook_status_button()
+                    self._reapply_last_title()
+
+            healthy, why = self._status_item_health()
+            if healthy:
+                log.info("status item restored (trigger: %s)", reason)
+            else:
+                log.error("status item heal did not stick (%s -> %s)", reason, why)
+        except Exception:
+            log.exception("status item self-heal raised")
+
+    def _watchdog_tick(self):
+        """Throttled status-item health check, driven by the 0.25s UI ticker."""
+        self._wd_counter = getattr(self, "_wd_counter", 0) + 1
+        # ~5s cadence, and skip the first ~10s so startup (button hook at +2s)
+        # settles before we judge the item unhealthy.
+        if self._wd_counter < 40 or self._wd_counter % 20 != 0:
+            return
+        try:
+            healthy, reason = self._status_item_health()
+        except Exception:
+            log.debug("status health probe raised", exc_info=True)
+            return
+        if not healthy:
+            self._reassert_status_item(reason)
 
     # -- widget ---------------------------------------------------------------
 
@@ -2746,6 +2892,10 @@ class ClaudeBar(rumps.App):
 
         Falls back to colored text symbols if AppKit / icons unavailable.
         """
+        # Remember the last requested render so the self-heal watchdog can
+        # redraw the bar onto a recreated status item without refetching.
+        self._last_title_segments = provider_segments
+        self._last_cc_msgs = cc_msgs
         try:
             from AppKit import (NSColor, NSFont,
                                 NSForegroundColorAttributeName, NSFontAttributeName)
@@ -2796,10 +2946,25 @@ class ClaudeBar(rumps.App):
                 seg.addAttribute_value_range_(NSForegroundColorAttributeName, cc_color, (3, 2))
                 s.appendAttributedString_(seg)
 
+            rendered = str(s.string())
+            if not rendered.strip():
+                # An empty attributed title makes the status item collapse to
+                # nothing -- the classic "process alive but icon gone" state.
+                # Surface it instead of silently blanking the bar.
+                log.warning(
+                    "bar title is empty (segments=%r, cc_msgs=%r) -- "
+                    "status item would be invisible; using fallback marker",
+                    provider_segments, cc_msgs,
+                )
+                self._nsapp.nsstatusitem.setAttributedTitle_(
+                    NSAttributedString.alloc().initWithString_("◆")
+                )
+                return
             self._nsapp.nsstatusitem.setAttributedTitle_(s)
+            log.debug("bar title set: %r", rendered)
             return
         except Exception as e:
-            log.debug("_set_bar_title failed: %s", e)
+            log.exception("_set_bar_title failed: %s", e)
         # Plain-text fallback
         parts = []
         for name, pct, suffix in provider_segments:
@@ -2857,6 +3022,7 @@ class ClaudeBar(rumps.App):
 
             self._set_bar_title(segments, cc_msgs=cc_msgs)
         else:
+            log.debug("_apply: no claude segments -- showing bare marker")
             self.title = "\u25c6"
         self._rebuild_menu(data)
         # Refresh the floating panel if it's currently visible
