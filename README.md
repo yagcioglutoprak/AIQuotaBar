@@ -116,7 +116,7 @@ cd AIQuotaBarWidget && ./build_widget.sh
 
 - **Zero-setup auth** — reads cookies directly from your browser (Chrome, Arc, Brave, Edge, Firefox, Safari)
 - **Claude + ChatGPT + Cursor + Copilot** — tracks Claude.ai session/weekly limits, ChatGPT rate limits, Cursor Auto/API usage, and GitHub Copilot premium requests — all in one place
-- **Desktop widget** — native macOS WidgetKit widget with brand-colored progress bars
+- **Desktop widget** — native macOS WidgetKit widget with brand-colored progress bars; toggle it off from the menu (**Desktop Widget → Enable Desktop Widget**) if you don't use it, and the setup window stops appearing
 - **Multi-provider** — add OpenAI, MiniMax, GLM (Zhipu) API keys to see spending alongside usage
 - **Burn rate + ETA** — predicts when you'll hit each limit based on your current pace
 - **Pacing alerts** — notifies you when you're on track to hit a limit within 30 minutes
@@ -189,6 +189,9 @@ Make sure you're logged into [claude.ai](https://claude.ai) in your browser, the
 
 **Session expired / showing ◆ !**
 The app will try to auto-detect fresh cookies from your browser. If that fails, click **Set Session Cookie…**.
+
+**The "AI Quota Widget" setup window keeps appearing**
+That's the desktop-widget host app. If you don't use the widget, turn it off via **Desktop Widget → Enable Desktop Widget** in the menu — the app then stops launching the host in the background, so the window won't reappear.
 
 ---
 
