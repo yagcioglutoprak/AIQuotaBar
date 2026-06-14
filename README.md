@@ -112,6 +112,21 @@ cd AIQuotaBarWidget && ./build_widget.sh
 
 ---
 
+## CLI Usage
+
+For scripting, status bar customization (e.g. Sketchybar), or other custom integrations, you can run the app in CLI mode:
+
+*   **Output current usage as JSON:**
+    ```bash
+    python3 claude_bar.py --json
+    ```
+*   **View usage history graph:**
+    ```bash
+    python3 claude_bar.py --history
+    ```
+
+---
+
 ## Features
 
 - **Zero-setup auth** — reads cookies directly from your browser (Chrome, Arc, Brave, Edge, Firefox, Safari)
