@@ -26,6 +26,19 @@ REFRESH_INTERVALS = {
 }
 DEFAULT_REFRESH = 300
 
+# ── Claude menu-bar metrics ───────────────────────────────────────────────────
+# Which Claude limit(s) are shown as % segments in the menu bar. Stored under
+# config["claude_bar_metrics"] as a list of these keys. Each entry maps to a
+# (menu label, compact bar tag) pair. Tags only render when two or more limits
+# are shown (to tell them apart); a lone limit shows a bare percentage, so the
+# default (session-only) display stays bare, matching older versions.
+CLAUDE_BAR_METRICS = {
+    "session":       ("Current Session (5h)", "5h"),
+    "weekly":        ("Weekly · All Models",  "7d"),
+    "weekly_sonnet": ("Weekly · Sonnet",      "7d·S"),
+}
+DEFAULT_CLAUDE_BAR_METRICS = ["session"]
+
 WARN_THRESHOLD = 80   # notify when any limit crosses this %
 CRIT_THRESHOLD = 95   # title turns red emoji above this %
 

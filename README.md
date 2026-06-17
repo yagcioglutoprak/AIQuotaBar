@@ -50,6 +50,14 @@ I kept getting cut off mid-session on Claude Pro with zero warning. Claude.ai do
 | 🟡 83% | Approaching the 5-hour limit |
 | 🔴 100% | Rate-limited — shows time until reset |
 | 🔴 100% · | Session is fine but weekly limit is maxed |
+| 🟢 `5h` 12%  `7d` 40% | Showing both: session (`5h`) + weekly (`7d`) |
+
+**Choose what the bar shows.** By default the bar shows your current 5-hour session
+percentage as a bare number. Open the menu → **Status Bar → Claude Limits** to add or
+remove the weekly (All Models) and weekly (Sonnet) limits. A single limit shows a bare
+percentage; as soon as you show two or more, each gets a compact label (`5h`, `7d`,
+`7d·S`) so they stay distinguishable. The same menu has a **Claude Code Messages** toggle
+to hide the `◆ N` weekly-message count if you only care about usage percentages.
 
 Open the menu for full detail:
 
@@ -116,6 +124,7 @@ cd AIQuotaBarWidget && ./build_widget.sh
 
 - **Zero-setup auth** — reads cookies directly from your browser (Chrome, Arc, Brave, Edge, Firefox, Safari)
 - **Claude + ChatGPT + Cursor + Copilot** — tracks Claude.ai session/weekly limits, ChatGPT rate limits, Cursor Auto/API usage, and GitHub Copilot premium requests — all in one place
+- **Pick your Claude limits** — show current session, weekly (All Models), weekly (Sonnet), or any combination in the bar; toggle the Claude Code message count on or off (Status Bar → Claude Limits)
 - **Desktop widget** — native macOS WidgetKit widget with brand-colored progress bars
 - **Multi-provider** — add OpenAI, MiniMax, GLM (Zhipu) API keys to see spending alongside usage
 - **Burn rate + ETA** — predicts when you'll hit each limit based on your current pace
