@@ -115,7 +115,10 @@ def _org_id_from_api(cookies: dict) -> str | None:
         try:
             data = _get(f"https://claude.ai{path}", cookies)
             if isinstance(data, list) and data:
-                return data[0].get("id") or data[0].get("uuid")
+                # Prefer uuid: claude.ai's /organizations/{id}/usage endpoint now
+                # rejects the legacy numeric id with HTTP 400 ("organization_uuid:
+                # invalid length"). The uuid field is the canonical org identifier.
+                return data[0].get("uuid") or data[0].get("id")
             if isinstance(data, dict):
                 for candidate in (
                     data.get("organization_id"),
@@ -226,8 +229,14 @@ def parse_usage(raw: dict) -> UsageData:
 
 # ── third-party provider APIs ────────────────────────────────────────────────
 
-def _api_get(url: str, headers: dict, cookies: dict | None = None) -> dict:
-    clean = _strip_cf_cookies(cookies) if cookies else None
+def _api_get(url: str, headers: dict, cookies: dict | None = None,
+             keep_cf: bool = False) -> dict:
+    # ChatGPT's Cloudflare edge requires the real cf_clearance cookie; stripping
+    # it (as Claude needs) makes chatgpt.com return 403. Pass keep_cf=True there.
+    if not cookies:
+        clean = None
+    else:
+        clean = cookies if keep_cf else _strip_cf_cookies(cookies)
     r = requests.get(url, headers=headers, cookies=clean, timeout=10, impersonate=_IMPERSONATE)
     r.raise_for_status()
     return r.json()
@@ -241,7 +250,7 @@ _CHATGPT_HEADERS = {
 
 def _chatgpt_access_token(cookies: dict) -> str | None:
     """Exchange session cookie for a short-lived Bearer token."""
-    data = _api_get("https://chatgpt.com/api/auth/session", _CHATGPT_HEADERS, cookies)
+    data = _api_get("https://chatgpt.com/api/auth/session", _CHATGPT_HEADERS, cookies, keep_cf=True)
     return data.get("accessToken")
 
 
@@ -301,7 +310,7 @@ def fetch_chatgpt(cookie_str: str) -> ProviderData:
         if not token:
             return ProviderData("ChatGPT", error="Not logged in")
         h = {**_CHATGPT_HEADERS, "Authorization": f"Bearer {token}"}
-        data = _api_get("https://chatgpt.com/backend-api/wham/usage", h, cookies)
+        data = _api_get("https://chatgpt.com/backend-api/wham/usage", h, cookies, keep_cf=True)
         return _parse_wham_usage(data)
     except Exception as e:
         log.debug("fetch_chatgpt failed: %s", e)
@@ -541,9 +550,13 @@ try:
         try:
             jar = fn(domain_name=domain)
             cookies = {x.name: x for x in jar}
-            if target not in cookies:
+            # ChatGPT chunks large session tokens across name.0/name.1 cookies,
+            # so accept the exact target OR any chunked variant (target + ".N").
+            match_key = target if target in cookies else next(
+                (n for n in cookies if n.startswith(target)), None)
+            if match_key is None:
                 continue
-            expires = cookies[target].expires or 0
+            expires = cookies[match_key].expires or 0
             # Normalize expiry to seconds. Firefox can report the value in
             # milliseconds (or an overflowed scale), which made a stale
             # session always out-rank a valid Chromium one. Anything past
