@@ -1324,6 +1324,7 @@ class _UsagePanel:
         self._handler = None         # ObjC click handler instance
         self._scroll = None
         self._built = False
+        self._click_monitor = None   # global mouse-down monitor: dismiss on outside click
 
     # -- public API -----------------------------------------------------------
 
@@ -1353,11 +1354,16 @@ class _UsagePanel:
             ctx.setDuration_(0.12)
             self._panel.animator().setAlphaValue_(1.0)
             self._visible = True
+            self._install_click_monitor()
         except Exception:
             log.debug("_UsagePanel.show failed", exc_info=True)
 
     def dismiss(self):
         """Hide the panel with a quick fade-out."""
+        if not self._visible:
+            return
+        self._visible = False
+        self._remove_click_monitor()
         try:
             if self._panel:
                 from AppKit import NSAnimationContext
@@ -1376,7 +1382,46 @@ class _UsagePanel:
         except Exception:
             if self._panel:
                 self._panel.orderOut_(None)
-        self._visible = False
+
+    def _install_click_monitor(self):
+        """Dismiss the panel when the user clicks anywhere outside it.
+
+        A *global* mouse-down monitor only observes events delivered to OTHER
+        applications (the desktop, another window, a different menu bar item),
+        so any click it sees means the user clicked off the panel. Clicks
+        inside the panel go to our own process and never reach it, so the
+        panel's own controls keep working. This is more reliable for a
+        borderless, accessory-app panel than relying on ``resignKeyWindow``
+        alone, and it works without the panel being the key window (an
+        accessory app can't reliably take key focus on recent macOS).
+        """
+        if self._click_monitor is not None:
+            return
+        try:
+            from AppKit import NSEvent
+            # NSEventMaskLeftMouseDown (1<<1) | NSEventMaskRightMouseDown (1<<3)
+            click_mask = (1 << 1) | (1 << 3)
+
+            def _on_outside_click(_event):
+                self.dismiss()
+
+            self._click_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                click_mask, _on_outside_click
+            )
+        except Exception:
+            log.debug("_install_click_monitor failed", exc_info=True)
+
+    def _remove_click_monitor(self):
+        """Tear down the outside-click monitor, if installed."""
+        if self._click_monitor is None:
+            return
+        try:
+            from AppKit import NSEvent
+            NSEvent.removeMonitor_(self._click_monitor)
+        except Exception:
+            log.debug("_remove_click_monitor failed", exc_info=True)
+        finally:
+            self._click_monitor = None
 
     def refresh(self):
         """Rebuild the panel content with current data."""
