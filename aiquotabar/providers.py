@@ -541,9 +541,21 @@ try:
         try:
             jar = fn(domain_name=domain)
             cookies = {x.name: x for x in jar}
-            if target not in cookies:
+            if target in cookies:
+                expiry_key = target
+            elif target + '.0' in cookies:
+                # NextAuth/Auth.js splits large session JWTs into chunked
+                # cookies (target.0, target.1, ...) when the token exceeds
+                # the ~4KB per-cookie browser limit (common once an account
+                # belongs to multiple orgs/workspaces). The chunks are still
+                # present in `cookies` and get joined into cookie_str below,
+                # exactly as the browser would send them to the real site --
+                # we just need to stop skipping this browser because the
+                # unsuffixed name doesn't exist.
+                expiry_key = target + '.0'
+            else:
                 continue
-            expires = cookies[target].expires or 0
+            expires = cookies[expiry_key].expires or 0
             # Normalize expiry to seconds. Firefox can report the value in
             # milliseconds (or an overflowed scale), which made a stale
             # session always out-rank a valid Chromium one. Anything past
