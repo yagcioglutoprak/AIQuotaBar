@@ -784,10 +784,18 @@ def _status_icon(pct: int) -> str:
 
 
 def _row_lines(row: LimitRow) -> list[str]:
+    """Original menu layout: title+pct, then bar with reset on the same line."""
     bar = _bar(row.pct)
     line1 = f"  {row.label}  {row.pct}%"
     line2 = f"  {bar}  {row.reset_str}" if row.reset_str else f"  {bar}"
     return [line1, line2]
+
+
+def _append_limit_row_items(items: list, row: LimitRow, color_hex: str):
+    """Append the original two-line limit block to a menu."""
+    lines = _row_lines(row)
+    items.append(_mi(lines[0]))
+    items.append(_colored_mi(lines[1], color_hex))
 
 
 def _provider_lines(pd: ProviderData) -> list[str]:
@@ -1312,6 +1320,7 @@ class _UsagePanel:
     PAD = 16
     PROGRESS_H = 6
     PROGRESS_RADIUS = 3
+    LIMIT_ROW_H = 34
     DOT_SIZE = 8
     SECTION_GAP = 12
     ROW_GAP = 4
@@ -1552,8 +1561,8 @@ class _UsagePanel:
             # Rows
             for row in [data.session, data.weekly_all, data.weekly_sonnet]:
                 if row:
-                    elements.append(('limit_row', y, 20, row, '#D97757'))
-                    y += 20 + self.ROW_GAP
+                    elements.append(('limit_row', y, self.LIMIT_ROW_H, row, '#D97757'))
+                    y += self.LIMIT_ROW_H + self.ROW_GAP
 
             # ETA
             eta = _calc_eta_minutes(history, "claude")
@@ -1587,13 +1596,8 @@ class _UsagePanel:
             elements.append(('provider_header', y, 18, 'ChatGPT', '#74AA9C', reset_str))
             y += 18 + 6
             for row in rows:
-                elements.append(('limit_row', y, 20, row, '#74AA9C'))
-                y += 20 + self.ROW_GAP
-                hkey = f"chatgpt_{row.label.lower().replace(' ', '_')}"
-                eta = _calc_eta_minutes(history, hkey)
-                if eta is not None:
-                    elements.append(('eta_line', y, 14, eta))
-                    y += 14 + 2
+                elements.append(('limit_row', y, self.LIMIT_ROW_H, row, '#74AA9C'))
+                y += self.LIMIT_ROW_H + self.ROW_GAP
             y += self.SECTION_GAP
 
         # Copilot section
@@ -1609,8 +1613,8 @@ class _UsagePanel:
             y += 18 + 6
             if copilot_pd.pct is not None:
                 fake_row = LimitRow("Premium Requests", copilot_pd.pct, "")
-                elements.append(('limit_row', y, 20, fake_row, '#6E40C9'))
-                y += 20 + self.ROW_GAP
+                elements.append(('limit_row', y, self.LIMIT_ROW_H, fake_row, '#6E40C9'))
+                y += self.LIMIT_ROW_H + self.ROW_GAP
             eta = _calc_eta_minutes(history, "copilot")
             if eta is not None:
                 elements.append(('eta_line', y, 14, eta))
@@ -1626,8 +1630,8 @@ class _UsagePanel:
             elements.append(('provider_header', y, 18, 'Cursor', '#00A0D1', reset_str))
             y += 18 + 6
             for row in rows:
-                elements.append(('limit_row', y, 20, row, '#00A0D1'))
-                y += 20 + self.ROW_GAP
+                elements.append(('limit_row', y, self.LIMIT_ROW_H, row, '#00A0D1'))
+                y += self.LIMIT_ROW_H + self.ROW_GAP
                 hkey = f"cursor_{row.label.lower().replace(' ', '_')}"
                 eta = _calc_eta_minutes(history, hkey)
                 if eta is not None:
@@ -1823,15 +1827,17 @@ class _UsagePanel:
     def _render_limit_row(self, parent, x, y, w, h, row, color_hex,
                           NSView, NSTextField, NSFont, NSColor, NSMakeRect,
                           NSTextAlignmentLeft, NSTextAlignmentRight, Quartz):
-        """Render: label + progress bar + pct% text."""
-        label_w = 80
+        """Render: label + pct on top; bar + right-aligned reset below."""
+        title_h = 14
+        bar_row_h = 14
         pct_w = 40
-        bar_x = x + label_w + 4
-        bar_w = w - label_w - pct_w - 8
-        bar_y = y + (h - self.PROGRESS_H) / 2
+        reset_w = 120 if row.reset_str else 0
+        label_w = max(80, w - pct_w - 4)
+        title_y = y + h - title_h
+        bar_y = y + 1
 
-        # Label
-        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, label_w, h))
+        # Label (top-left)
+        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, title_y, label_w, title_h))
         lbl.setStringValue_(row.label)
         lbl.setBezeled_(False)
         lbl.setDrawsBackground_(False)
@@ -1842,7 +1848,21 @@ class _UsagePanel:
         lbl.setTextColor_(NSColor.secondaryLabelColor())
         parent.addSubview_(lbl)
 
-        # Track (background)
+        # Percentage (top-right)
+        pct_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x + w - pct_w, title_y, pct_w, title_h))
+        pct_lbl.setStringValue_(f"{row.pct}%")
+        pct_lbl.setBezeled_(False)
+        pct_lbl.setDrawsBackground_(False)
+        pct_lbl.setEditable_(False)
+        pct_lbl.setSelectable_(False)
+        pct_lbl.setAlignment_(NSTextAlignmentRight)
+        pct_lbl.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(11, 0.3))
+        pct_lbl.setTextColor_(NSColor.labelColor())
+        parent.addSubview_(pct_lbl)
+
+        # Progress track (bottom row, left)
+        bar_x = x
+        bar_w = max(60, w - reset_w - 8)
         track = NSView.alloc().initWithFrame_(NSMakeRect(bar_x, bar_y, bar_w, self.PROGRESS_H))
         track.setWantsLayer_(True)
         track.layer().setBackgroundColor_(
@@ -1852,7 +1872,6 @@ class _UsagePanel:
         track.layer().setMasksToBounds_(True)
         parent.addSubview_(track)
 
-        # Fill
         fill_w = max(0, bar_w * row.pct / 100)
         if fill_w > 0:
             fill = NSView.alloc().initWithFrame_(NSMakeRect(bar_x, bar_y, fill_w, self.PROGRESS_H))
@@ -1864,17 +1883,18 @@ class _UsagePanel:
             fill.layer().setMasksToBounds_(True)
             parent.addSubview_(fill)
 
-        # Percentage text
-        pct_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x + w - pct_w, y, pct_w, h))
-        pct_lbl.setStringValue_(f"{row.pct}%")
-        pct_lbl.setBezeled_(False)
-        pct_lbl.setDrawsBackground_(False)
-        pct_lbl.setEditable_(False)
-        pct_lbl.setSelectable_(False)
-        pct_lbl.setAlignment_(NSTextAlignmentRight)
-        pct_lbl.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(11, 0.3))
-        pct_lbl.setTextColor_(NSColor.labelColor())
-        parent.addSubview_(pct_lbl)
+        # Reset time (bottom row, right)
+        if row.reset_str:
+            reset_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x + w - reset_w, bar_y - 1, reset_w, bar_row_h))
+            reset_lbl.setStringValue_(row.reset_str)
+            reset_lbl.setBezeled_(False)
+            reset_lbl.setDrawsBackground_(False)
+            reset_lbl.setEditable_(False)
+            reset_lbl.setSelectable_(False)
+            reset_lbl.setAlignment_(NSTextAlignmentRight)
+            reset_lbl.setFont_(NSFont.systemFontOfSize_(10))
+            reset_lbl.setTextColor_(NSColor.secondaryLabelColor())
+            parent.addSubview_(reset_lbl)
 
     def _render_small_text(self, parent, x, y, w, h, text,
                            NSTextField, NSFont, NSColor, NSMakeRect,
@@ -1956,6 +1976,8 @@ class ClaudeBar(rumps.App):
         self._db_lock = threading.Lock()
         self._login_item_cached: bool | None = None
         self._last_update_check = self.config.get("last_update_check", 0)
+        self._pending_menu_rebuild_data: UsageData | None = None
+        self._menu_rebuild_defer_timer = None
 
         if not _is_login_item():
             _add_login_item()
@@ -1994,7 +2016,46 @@ class ClaudeBar(rumps.App):
 
     # -- menu -----------------------------------------------------------------
 
+    def _menu_tracking_active(self) -> bool:
+        """True while a pop-up menu is open (modal event-tracking run loop)."""
+        try:
+            from Foundation import NSRunLoop
+            mode = NSRunLoop.currentRunLoop().currentMode()
+            if mode is None:
+                return False
+            name = str(mode)
+            return ("EventTracking" in name) or ("ModalPanel" in name)
+        except Exception:
+            return False
+
+    def _schedule_deferred_menu_rebuild(self, data: UsageData | None):
+        self._pending_menu_rebuild_data = data
+        if self._menu_rebuild_defer_timer is not None:
+            return
+        self._menu_rebuild_defer_timer = rumps.Timer(
+            self._flush_deferred_menu_rebuild, 0.35
+        )
+        self._menu_rebuild_defer_timer.start()
+
+    def _flush_deferred_menu_rebuild(self, timer):
+        timer.stop()
+        self._menu_rebuild_defer_timer = None
+        data = self._pending_menu_rebuild_data
+        self._pending_menu_rebuild_data = None
+        if data is None:
+            return
+        if self._menu_tracking_active():
+            self._schedule_deferred_menu_rebuild(data)
+            return
+        self._do_rebuild_menu(data)
+
     def _rebuild_menu(self, data: UsageData | None):
+        if self._menu_tracking_active():
+            self._schedule_deferred_menu_rebuild(data)
+            return
+        self._do_rebuild_menu(data)
+
+    def _do_rebuild_menu(self, data: UsageData | None):
         items: list = []
 
         # -- CLAUDE section ---------------------------------------------------
@@ -2004,9 +2065,7 @@ class ClaudeBar(rumps.App):
             items.append(_mi("  No data \u2014 click Auto-detect from Browser"))
         else:
             if data.session:
-                lines = _row_lines(data.session)
-                items.append(_mi(lines[0]))
-                items.append(_colored_mi(lines[1], "#D97757"))
+                _append_limit_row_items(items, data.session, "#D97757")
                 # ETA + sparkline for Claude session
                 eta = _calc_eta_minutes(self._history, "claude")
                 if eta is not None:
@@ -2025,9 +2084,7 @@ class ClaudeBar(rumps.App):
 
             for row in [data.weekly_all, data.weekly_sonnet]:
                 if row:
-                    lines = _row_lines(row)
-                    items.append(_mi(lines[0]))
-                    items.append(_colored_mi(lines[1], "#D97757"))
+                    _append_limit_row_items(items, row, "#D97757")
                     items.append(None)
 
 
@@ -2041,23 +2098,7 @@ class ClaudeBar(rumps.App):
             rows = getattr(chatgpt_pd, "_rows", None)
             if rows:
                 for row in rows:
-                    lines = _row_lines(row)
-                    items.append(_mi(lines[0]))
-                    items.append(_colored_mi(lines[1], "#74AA9C"))
-                    hkey = f"chatgpt_{row.label.lower().replace(' ', '_')}"
-                    eta = _calc_eta_minutes(self._history, hkey)
-                    if eta is not None:
-                        items.append(_mi(f"  \u23f1 Limit in ~{_fmt_eta(eta)}"))
-                    spark = _sparkline(self._history, hkey)
-                    if spark:
-                        items.append(_mi(f"  {spark}"))
-                        items.append(_mi(f"  \U0001f4c8 24h usage trend"))
-                    try:
-                        hits = _get_week_limit_hits(self._history_db, hkey)
-                    except Exception:
-                        hits = 0
-                    if hits > 0:
-                        items.append(_mi(f"  Hit limit {hits}x this week"))
+                    _append_limit_row_items(items, row, "#74AA9C")
                     items.append(None)
             else:
                 for line in _provider_lines(chatgpt_pd):
@@ -2099,23 +2140,7 @@ class ClaudeBar(rumps.App):
             rows = getattr(cursor_pd, "_rows", None)
             if rows:
                 for row in rows:
-                    lines = _row_lines(row)
-                    items.append(_mi(lines[0]))
-                    items.append(_colored_mi(lines[1], "#00A0D1"))
-                    hkey = f"cursor_{row.label.lower().replace(' ', '_')}"
-                    eta = _calc_eta_minutes(self._history, hkey)
-                    if eta is not None:
-                        items.append(_mi(f"  \u23f1 Limit in ~{_fmt_eta(eta)}"))
-                    spark = _sparkline(self._history, hkey)
-                    if spark:
-                        items.append(_mi(f"  {spark}"))
-                        items.append(_mi(f"  \U0001f4c8 24h usage trend"))
-                    try:
-                        hits = _get_week_limit_hits(self._history_db, hkey)
-                    except Exception:
-                        hits = 0
-                    if hits > 0:
-                        items.append(_mi(f"  Hit limit {hits}x this week"))
+                    _append_limit_row_items(items, row, "#00A0D1")
                     items.append(None)
             else:
                 for line in _provider_lines(cursor_pd):
@@ -2433,10 +2458,13 @@ class ClaudeBar(rumps.App):
                 )
 
     def _open_widget_settings(self, _sender):
-        """Open the widget host app (shows add-widget instructions)."""
-        subprocess.Popen(
-            ["open", "-a", "AIQuotaBarHost"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        """Widget host disabled — menu bar only."""
+        rumps.alert(
+            title="Desktop Widget",
+            message=(
+                "The desktop widget is not in use on this Mac.\n\n"
+                "Your usage limits are shown in the menu bar icon (◆)."
+            ),
         )
 
     def _install_widget_prompt(self, _sender):
@@ -2553,8 +2581,10 @@ class ClaudeBar(rumps.App):
             self._post_data(data)          # <- main thread applies title + menu
             _write_widget_cache(data, self._provider_data, self._cc_stats, self.config)
 
-            # -- silent auto-update --
-            if time.time() - self._last_update_check > UPDATE_CHECK_INTERVAL:
+            # -- silent auto-update (can be disabled in config: auto_update=false) --
+            if self.config.get("auto_update", True) and (
+                time.time() - self._last_update_check > UPDATE_CHECK_INTERVAL
+            ):
                 self._last_update_check = time.time()
                 with self._config_lock:
                     self.config["last_update_check"] = self._last_update_check
@@ -2824,40 +2854,41 @@ class ClaudeBar(rumps.App):
     # Priority order for the 2 bar slots (highest first)
     _BAR_PRIORITY = ["Claude", "ChatGPT", "Cursor", "Copilot"]
 
-    def _apply(self, data: UsageData):
+    def _bar_segments_for(self, data: UsageData) -> list[tuple[str, int, str]]:
         primary = data.session or data.weekly_all or data.weekly_sonnet
-        if primary:
-            weekly_maxed = any(
-                r and r.pct >= CRIT_THRESHOLD
-                for r in [data.weekly_all, data.weekly_sonnet]
-            )
-            extra = " \u00b7" if (weekly_maxed and primary is data.session
-                             and primary.pct < CRIT_THRESHOLD) else ""
+        if not primary:
+            return []
+        weekly_maxed = any(
+            r and r.pct >= CRIT_THRESHOLD
+            for r in [data.weekly_all, data.weekly_sonnet]
+        )
+        extra = " \u00b7" if (weekly_maxed and primary is data.session
+                         and primary.pct < CRIT_THRESHOLD) else ""
 
-            # Collect all available segments
-            available: dict[str, tuple[str, int, str]] = {}
-            available["Claude"] = ("Claude", primary.pct, extra)
-            for pd in self._provider_data:
-                bar_pct = self._provider_bar_pct(pd)
-                if bar_pct is not None:
-                    available[pd.name] = (pd.name, bar_pct, "")
+        available: dict[str, tuple[str, int, str]] = {}
+        available["Claude"] = ("Claude", primary.pct, extra)
+        for pd in self._provider_data:
+            bar_pct = self._provider_bar_pct(pd)
+            if bar_pct is not None:
+                available[pd.name] = (pd.name, bar_pct, "")
 
-            # User-configured bar providers, or auto top 2 by priority
-            chosen = self.config.get("bar_providers")
-            if chosen:
-                segments = [available[n] for n in chosen if n in available]
-            else:
-                segments = [available[n] for n in self._BAR_PRIORITY
-                            if n in available][:2]
+        chosen = self.config.get("bar_providers")
+        if chosen:
+            return [available[n] for n in chosen if n in available]
+        return [available[n] for n in self._BAR_PRIORITY if n in available][:2]
 
-            # Claude Code weekly messages
-            cc_msgs: int | None = None
+    def _update_bar_title_only(self, data: UsageData):
+        segments = self._bar_segments_for(data)
+        if segments:
+            cc_msgs = None
             if self._cc_stats:
                 cc_msgs = self._cc_stats.get("week_messages")
-
             self._set_bar_title(segments, cc_msgs=cc_msgs)
         else:
             self.title = "\u25c6"
+
+    def _apply(self, data: UsageData):
+        self._update_bar_title_only(data)
         self._rebuild_menu(data)
         # Refresh the floating panel if it's currently visible
         try:
@@ -2997,7 +3028,7 @@ class ClaudeBar(rumps.App):
             self._timer.stop()
             self._timer = rumps.Timer(self._on_timer, secs)
             self._timer.start()
-            self._rebuild_menu(self._last_data)
+            self._schedule_deferred_menu_rebuild(self._last_data)
         return _cb
 
     _TOGGLE_ICONS = {
@@ -3115,15 +3146,15 @@ class ClaudeBar(rumps.App):
             check.setStringValue_("\u2713" if is_on else "")
 
         if self._last_data:
-            self._apply(self._last_data)
+            self._update_bar_title_only(self._last_data)
 
     def _bar_reset_auto(self, _sender):
         """Reset bar display to auto-detect (top 2 active providers)."""
         self.config.pop("bar_providers", None)
         save_config(self.config)
-        self._rebuild_menu(self._last_data)
         if self._last_data:
-            self._apply(self._last_data)
+            self._update_bar_title_only(self._last_data)
+        self._schedule_deferred_menu_rebuild(self._last_data)
 
     def _set_cookie(self, _sender):
         key = _ask_text(

@@ -161,6 +161,40 @@ def fetch_raw(cookie_str: str) -> dict:
 _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
+def _fmt_reset_after_seconds(secs: int) -> str:
+    """Format remaining window time when only reset_after_seconds is available."""
+    try:
+        secs = int(secs)
+    except (TypeError, ValueError):
+        return ""
+    if secs <= 0:
+        return "resets soon"
+    if secs < 3600 * 20:
+        h, rem = divmod(secs, 3600)
+        m = rem // 60
+        if h > 0:
+            return f"resets in {h}h {m}m"
+        return f"resets in {m}m"
+    dt = datetime.now(timezone.utc) + timedelta(seconds=secs)
+    day = _DAYS[dt.weekday()]
+    return f"resets {day} {dt.strftime('%H:%M')}"
+
+
+def _reset_str_from_window(window: dict) -> str:
+    """Reset label from wham window: reset_at first, then reset_after_seconds."""
+    if not window or not isinstance(window, dict):
+        return ""
+    reset_at = window.get("reset_at")
+    if reset_at:
+        reset = _fmt_reset(reset_at)
+        if reset:
+            return reset
+    reset_after = window.get("reset_after_seconds")
+    if reset_after is not None:
+        return _fmt_reset_after_seconds(reset_after)
+    return ""
+
+
 def _fmt_reset(val) -> str:
     if val is None:
         return ""
@@ -192,7 +226,14 @@ def _fmt_reset(val) -> str:
 
 # ── parser ────────────────────────────────────────────────────────────────────
 
-def _row(data: dict, key: str, label: str) -> LimitRow | None:
+_CLAUDE_LIMIT_KINDS = {
+    "five_hour": "session",
+    "seven_day": "weekly_all",
+    "seven_day_sonnet": "weekly_sonnet",
+}
+
+
+def _row(data: dict, key: str, label: str, limits: list | None = None) -> LimitRow | None:
     bucket = data.get(key)
     if not bucket or not isinstance(bucket, dict):
         return None
@@ -200,6 +241,13 @@ def _row(data: dict, key: str, label: str) -> LimitRow | None:
     # API returns 0-100 percentage for all fields (five_hour, seven_day, etc.)
     pct = min(100, round(raw))
     reset = _fmt_reset(bucket.get("resets_at"))
+    if not reset and limits:
+        kind = _CLAUDE_LIMIT_KINDS.get(key)
+        if kind:
+            for lim in limits:
+                if isinstance(lim, dict) and lim.get("kind") == kind:
+                    reset = _fmt_reset(lim.get("resets_at"))
+                    break
     return LimitRow(label, pct, reset)
 
 
@@ -214,11 +262,12 @@ def parse_usage(raw: dict) -> UsageData:
     u = raw.get("usage", {})
     extra = u.get("extra_usage")
     overages = bool(extra) if extra is not None else None
+    limits = u.get("limits") or []
 
     return UsageData(
-        session=_row(u, "five_hour", "Current Session"),
-        weekly_all=_row(u, "seven_day", "All Models"),
-        weekly_sonnet=_row(u, "seven_day_sonnet", "Sonnet Only"),
+        session=_row(u, "five_hour", "Current Session", limits),
+        weekly_all=_row(u, "seven_day", "All Models", limits),
+        weekly_sonnet=_row(u, "seven_day_sonnet", "Sonnet Only", limits),
         overages_enabled=overages,
         raw=raw,
     )
@@ -245,21 +294,80 @@ def _chatgpt_access_token(cookies: dict) -> str | None:
     return data.get("accessToken")
 
 
-def _parse_wham_window(window: dict, label: str) -> LimitRow | None:
-    """Parse a single rate-limit window dict into a LimitRow."""
+def _chatgpt_session(cookies: dict) -> tuple[str | None, str | None]:
+    """Return (access_token, account_id) from the ChatGPT web session."""
+    data = _api_get("https://chatgpt.com/api/auth/session", _CHATGPT_HEADERS, cookies)
+    token = data.get("accessToken")
+    account_id = (data.get("account") or {}).get("id")
+    return token, account_id
+
+
+def _pct_from_wham_window(window: dict) -> int:
+    """Best-effort usage % from a wham window object.
+
+    OpenAI sometimes returns used_percent=0 while reset_after_seconds and
+    limit_window_seconds still reflect partial consumption. Derive a fallback
+    from the remaining window time when that happens.
+    """
+    reported = window.get("used_percent")
+    try:
+        reported_pct = min(100, max(0, int(round(float(reported or 0)))))
+    except (TypeError, ValueError):
+        reported_pct = 0
+
+    limit_secs = window.get("limit_window_seconds") or 0
+    reset_after = window.get("reset_after_seconds")
+    derived_pct = 0
+    try:
+        if limit_secs > 0 and reset_after is not None:
+            remaining = float(reset_after) / float(limit_secs)
+            derived_pct = min(100, max(0, round((1 - remaining) * 100)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        derived_pct = 0
+
+    return max(reported_pct, derived_pct)
+
+
+def _limit_row_from_window(window: dict, label: str) -> LimitRow | None:
+    """Build one LimitRow from a wham primary/secondary window dict."""
     if not window or not isinstance(window, dict):
         return None
-    pw = window.get("primary_window") or {}
-    pct = min(100, int(pw.get("used_percent", 0)))
-    reset_str = _fmt_reset(pw.get("reset_at")) if pw.get("reset_at") else ""
+    pct = _pct_from_wham_window(window)
+    reset_str = _reset_str_from_window(window)
     return LimitRow(label, pct, reset_str)
+
+
+def _parse_wham_rate_block(
+    block: dict | None,
+    primary_label: str,
+    secondary_label: str | None = None,
+) -> list[LimitRow]:
+    """Parse primary + secondary windows from a wham rate_limit block."""
+    rows: list[LimitRow] = []
+    if not block or not isinstance(block, dict):
+        return rows
+    primary = _limit_row_from_window(block.get("primary_window") or {}, primary_label)
+    if primary:
+        rows.append(primary)
+    if secondary_label:
+        secondary = _limit_row_from_window(block.get("secondary_window") or {}, secondary_label)
+        if secondary:
+            rows.append(secondary)
+    return rows
+
+
+def _parse_wham_window(window: dict, label: str) -> LimitRow | None:
+    """Parse only the primary window (legacy helper)."""
+    rows = _parse_wham_rate_block(window, label)
+    return rows[0] if rows else None
 
 
 def _parse_wham_usage(data: dict) -> ProviderData:
     """Parse /backend-api/wham/usage response.
 
     Confirmed shape (2026-02):
-      rate_limit.primary_window.used_percent  (0-100)
+      rate_limit.primary_window.used_percent  (0-100)  ~5h bucket
+      rate_limit.secondary_window.used_percent         ~7d bucket
       rate_limit.primary_window.reset_at      (Unix timestamp)
       code_review_rate_limit  -- same structure
     """
@@ -267,22 +375,26 @@ def _parse_wham_usage(data: dict) -> ProviderData:
 
     rows: list[LimitRow] = []
 
-    label_map = {
-        "rate_limit":            "Codex Tasks",
-        "code_review_rate_limit": "Code Review",
+    bucket_labels = {
+        "rate_limit": ("Codex Tasks", "Codex Weekly"),
+        "code_review_rate_limit": ("Code Review", "Code Review Weekly"),
     }
-    for key, label in label_map.items():
-        row = _parse_wham_window(data.get(key), label)
-        if row is not None:
-            rows.append(row)
+    for key, (primary_label, secondary_label) in bucket_labels.items():
+        rows.extend(_parse_wham_rate_block(data.get(key), primary_label, secondary_label))
 
     # additional_rate_limits may be a list of extra buckets
     for extra in (data.get("additional_rate_limits") or []):
         if isinstance(extra, dict):
-            name = extra.get("name") or extra.get("type") or "Extra"
-            row = _parse_wham_window(extra, name.replace("_", " ").title())
-            if row:
-                rows.append(row)
+            name = (
+                extra.get("limit_name")
+                or extra.get("metered_feature")
+                or extra.get("name")
+                or extra.get("type")
+                or "Extra"
+            )
+            base = str(name).replace("_", " ").title()
+            block = extra.get("rate_limit") if isinstance(extra.get("rate_limit"), dict) else extra
+            rows.extend(_parse_wham_rate_block(block, base, f"{base} Weekly"))
 
     if not rows:
         return ProviderData("ChatGPT", error="No rate limit data in response")
@@ -297,10 +409,12 @@ def fetch_chatgpt(cookie_str: str) -> ProviderData:
     """Fetch ChatGPT / Codex usage via /backend-api/wham/usage."""
     cookies = parse_cookie_string(cookie_str)
     try:
-        token = _chatgpt_access_token(cookies)
+        token, account_id = _chatgpt_session(cookies)
         if not token:
             return ProviderData("ChatGPT", error="Not logged in")
         h = {**_CHATGPT_HEADERS, "Authorization": f"Bearer {token}"}
+        if account_id:
+            h["ChatGPT-Account-Id"] = str(account_id)
         data = _api_get("https://chatgpt.com/backend-api/wham/usage", h, cookies)
         return _parse_wham_usage(data)
     except Exception as e:
@@ -541,9 +655,21 @@ try:
         try:
             jar = fn(domain_name=domain)
             cookies = {x.name: x for x in jar}
-            if target not in cookies:
+            if target in cookies:
+                expiry_key = target
+            elif target + '.0' in cookies:
+                # NextAuth/Auth.js splits large session JWTs into chunked
+                # cookies (target.0, target.1, ...) when the token exceeds
+                # the ~4KB per-cookie browser limit (common once an account
+                # belongs to multiple orgs/workspaces). The chunks are still
+                # present in `cookies` and get joined into cookie_str below,
+                # exactly as the browser would send them to the real site --
+                # we just need to stop skipping this browser because the
+                # unsuffixed name doesn't exist.
+                expiry_key = target + '.0'
+            else:
                 continue
-            expires = cookies[target].expires or 0
+            expires = cookies[expiry_key].expires or 0
             # Normalize expiry to seconds. Firefox can report the value in
             # milliseconds (or an overflowed scale), which made a stale
             # session always out-rank a valid Chromium one. Anything past
