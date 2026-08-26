@@ -784,23 +784,18 @@ def _status_icon(pct: int) -> str:
 
 
 def _row_lines(row: LimitRow) -> list[str]:
-    """Menu lines: title+pct, colored bar, optional reset time on its own line."""
+    """Original menu layout: title+pct, then bar with reset on the same line."""
     bar = _bar(row.pct)
     line1 = f"  {row.label}  {row.pct}%"
-    line2 = f"  {bar}"
-    lines = [line1, line2]
-    if row.reset_str:
-        lines.append(f"  {row.reset_str}")
-    return lines
+    line2 = f"  {bar}  {row.reset_str}" if row.reset_str else f"  {bar}"
+    return [line1, line2]
 
 
 def _append_limit_row_items(items: list, row: LimitRow, color_hex: str):
-    """Append limit block: title, bar, then reset time if available."""
+    """Append the original two-line limit block to a menu."""
     lines = _row_lines(row)
     items.append(_mi(lines[0]))
     items.append(_colored_mi(lines[1], color_hex))
-    if len(lines) > 2:
-        items.append(_mi(lines[2]))
 
 
 def _provider_lines(pd: ProviderData) -> list[str]:
@@ -1325,7 +1320,7 @@ class _UsagePanel:
     PAD = 16
     PROGRESS_H = 6
     PROGRESS_RADIUS = 3
-    LIMIT_ROW_H = 40
+    LIMIT_ROW_H = 34
     DOT_SIZE = 8
     SECTION_GAP = 12
     ROW_GAP = 4
@@ -1832,16 +1827,17 @@ class _UsagePanel:
     def _render_limit_row(self, parent, x, y, w, h, row, color_hex,
                           NSView, NSTextField, NSFont, NSColor, NSMakeRect,
                           NSTextAlignmentLeft, NSTextAlignmentRight, Quartz):
-        """Render: label + pct, progress bar, reset time on its own line."""
-        label_h = 14
-        reset_h = 12
+        """Render: label + pct on top; bar + right-aligned reset below."""
+        title_h = 14
+        bar_row_h = 14
         pct_w = 40
+        reset_w = 120 if row.reset_str else 0
         label_w = max(80, w - pct_w - 4)
-        top_y = y + h - label_h
-        bar_y = y + reset_h + 4
+        title_y = y + h - title_h
+        bar_y = y + 1
 
         # Label (top-left)
-        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, top_y, label_w, label_h))
+        lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, title_y, label_w, title_h))
         lbl.setStringValue_(row.label)
         lbl.setBezeled_(False)
         lbl.setDrawsBackground_(False)
@@ -1852,30 +1848,8 @@ class _UsagePanel:
         lbl.setTextColor_(NSColor.secondaryLabelColor())
         parent.addSubview_(lbl)
 
-        # Track (full width, middle)
-        track = NSView.alloc().initWithFrame_(NSMakeRect(x, bar_y, w, self.PROGRESS_H))
-        track.setWantsLayer_(True)
-        track.layer().setBackgroundColor_(
-            Quartz.CGColorCreateGenericRGB(0.15, 0.15, 0.2, 1.0)
-        )
-        track.layer().setCornerRadius_(self.PROGRESS_RADIUS)
-        track.layer().setMasksToBounds_(True)
-        parent.addSubview_(track)
-
-        # Fill
-        fill_w = max(0, w * row.pct / 100)
-        if fill_w > 0:
-            fill = NSView.alloc().initWithFrame_(NSMakeRect(x, bar_y, fill_w, self.PROGRESS_H))
-            fill.setWantsLayer_(True)
-            hx = color_hex.lstrip("#")
-            r, g, b = int(hx[0:2], 16) / 255, int(hx[2:4], 16) / 255, int(hx[4:6], 16) / 255
-            fill.layer().setBackgroundColor_(Quartz.CGColorCreateGenericRGB(r, g, b, 1.0))
-            fill.layer().setCornerRadius_(self.PROGRESS_RADIUS)
-            fill.layer().setMasksToBounds_(True)
-            parent.addSubview_(fill)
-
-        # Percentage text (top-right)
-        pct_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x + w - pct_w, top_y, pct_w, label_h))
+        # Percentage (top-right)
+        pct_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x + w - pct_w, title_y, pct_w, title_h))
         pct_lbl.setStringValue_(f"{row.pct}%")
         pct_lbl.setBezeled_(False)
         pct_lbl.setDrawsBackground_(False)
@@ -1886,17 +1860,40 @@ class _UsagePanel:
         pct_lbl.setTextColor_(NSColor.labelColor())
         parent.addSubview_(pct_lbl)
 
-        # Reset time (bottom line)
+        # Progress track (bottom row, left)
+        bar_x = x
+        bar_w = max(60, w - reset_w - 8)
+        track = NSView.alloc().initWithFrame_(NSMakeRect(bar_x, bar_y, bar_w, self.PROGRESS_H))
+        track.setWantsLayer_(True)
+        track.layer().setBackgroundColor_(
+            Quartz.CGColorCreateGenericRGB(0.15, 0.15, 0.2, 1.0)
+        )
+        track.layer().setCornerRadius_(self.PROGRESS_RADIUS)
+        track.layer().setMasksToBounds_(True)
+        parent.addSubview_(track)
+
+        fill_w = max(0, bar_w * row.pct / 100)
+        if fill_w > 0:
+            fill = NSView.alloc().initWithFrame_(NSMakeRect(bar_x, bar_y, fill_w, self.PROGRESS_H))
+            fill.setWantsLayer_(True)
+            hx = color_hex.lstrip("#")
+            r, g, b = int(hx[0:2], 16) / 255, int(hx[2:4], 16) / 255, int(hx[4:6], 16) / 255
+            fill.layer().setBackgroundColor_(Quartz.CGColorCreateGenericRGB(r, g, b, 1.0))
+            fill.layer().setCornerRadius_(self.PROGRESS_RADIUS)
+            fill.layer().setMasksToBounds_(True)
+            parent.addSubview_(fill)
+
+        # Reset time (bottom row, right)
         if row.reset_str:
-            reset_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, w, reset_h))
+            reset_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x + w - reset_w, bar_y - 1, reset_w, bar_row_h))
             reset_lbl.setStringValue_(row.reset_str)
             reset_lbl.setBezeled_(False)
             reset_lbl.setDrawsBackground_(False)
             reset_lbl.setEditable_(False)
             reset_lbl.setSelectable_(False)
-            reset_lbl.setAlignment_(NSTextAlignmentLeft)
+            reset_lbl.setAlignment_(NSTextAlignmentRight)
             reset_lbl.setFont_(NSFont.systemFontOfSize_(10))
-            reset_lbl.setTextColor_(NSColor.tertiaryLabelColor())
+            reset_lbl.setTextColor_(NSColor.secondaryLabelColor())
             parent.addSubview_(reset_lbl)
 
     def _render_small_text(self, parent, x, y, w, h, text,
