@@ -9,6 +9,9 @@ from aiquotabar.config import log
 
 def _check_and_apply_update() -> bool:
     """Silently check for updates via git and apply if available. Returns True if updated."""
+    from aiquotabar.config import load_config
+    if not load_config().get("auto_update", True):
+        return False
     install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if not os.path.isdir(os.path.join(install_dir, ".git")):
         return False  # Not a git install (Homebrew, dev, etc.)

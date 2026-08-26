@@ -2,10 +2,9 @@
 
 import json
 import os
-import subprocess
 from datetime import datetime, timezone
 
-from aiquotabar.config import log, WIDGET_HOST_APP, WIDGET_CACHE_DIR, WIDGET_CACHE_FILE
+from aiquotabar.config import log, WIDGET_CACHE_DIR, WIDGET_CACHE_FILE
 from aiquotabar.providers import LimitRow, UsageData, ProviderData
 
 
@@ -119,15 +118,11 @@ def _write_widget_cache(
         os.replace(tmp, WIDGET_CACHE_FILE)
         log.debug("widget cache written: %s", WIDGET_CACHE_FILE)
 
-        # Nudge WidgetKit to reload (non-blocking, best-effort)
-        subprocess.Popen(
-            ["open", "-g", "-a", "AIQuotaBarHost", "--args", "--reload-widget"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # Do not auto-launch AIQuotaBarHost — pops up setup window every refresh.
     except Exception:
         log.debug("_write_widget_cache failed", exc_info=True)
 
 
 def _is_widget_installed() -> bool:
-    """Check if the AIQuotaBarHost widget app is installed."""
-    return os.path.isdir(WIDGET_HOST_APP)
+    """Desktop widget not used on this Mac (menu bar only)."""
+    return False
