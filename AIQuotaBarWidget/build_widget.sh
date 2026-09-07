@@ -57,17 +57,44 @@ xcodebuild \
     DEVELOPMENT_TEAM="" \
     2>&1 | tail -5
 
-# ── Install ──────────────────────────────────────────────────────────────────
+# ── Sign ─────────────────────────────────────────────────────────────────────
+# The build runs with CODE_SIGNING_ALLOWED=NO, which leaves a linker-signed
+# bundle with no entitlements and a placeholder identifier. macOS will not
+# register a widget extension in that state, so the widget never appears in
+# the picker. Ad-hoc sign both bundles with their real entitlements; the
+# extension needs its sandbox exception to read usage.json at all.
 BUILT_APP=$(find "$BUILD_DIR" -name "$APP_NAME" -type d | head -1)
 if [ -z "$BUILT_APP" ]; then
     echo "  ✗  Build failed — app bundle not found."
     exit 1
 fi
 
+echo "  ↓  Signing…"
+BUILT_EXT="$BUILT_APP/Contents/PlugIns/AIQuotaBarWidgetExtension.appex"
+codesign --force --sign - --timestamp=none \
+    --entitlements "$PROJECT_DIR/AIQuotaBarWidgetExtension/AIQuotaBarWidgetExtension.entitlements" \
+    "$BUILT_EXT" >/dev/null 2>&1
+codesign --force --sign - --timestamp=none \
+    --entitlements "$PROJECT_DIR/AIQuotaBarHost/AIQuotaBarHost.entitlements" \
+    "$BUILT_APP" >/dev/null 2>&1
+if ! codesign --verify --deep --strict "$BUILT_APP" 2>/dev/null; then
+    echo "  ✗  Signing failed — macOS will not register an unsigned widget."
+    exit 1
+fi
+echo "  ✓  Signed (ad-hoc, with entitlements)"
+
 INSTALL_PATH="/Applications/$APP_NAME"
 echo "  ↓  Installing to $INSTALL_PATH…"
 rm -rf "$INSTALL_PATH"
-cp -R "$BUILT_APP" "$INSTALL_PATH"
+# ditto, not cp -R: preserves extended attributes so the signature stays intact.
+ditto "$BUILT_APP" "$INSTALL_PATH"
+
+# Drop the build-directory copy from LaunchServices. Both copies share the
+# bundle id, and if the build copy stays registered the system can host the
+# widget from there instead of /Applications - silently serving stale code.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -u "$BUILT_APP" 2>/dev/null || true
+"$LSREGISTER" -f "$INSTALL_PATH" 2>/dev/null || true
 
 # Launch once to register the widget with the system
 open "$INSTALL_PATH"
