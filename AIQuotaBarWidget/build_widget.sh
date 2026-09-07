@@ -45,7 +45,16 @@ if [ ! -d "$PROJECT_DIR/AIQuotaBarWidget.xcodeproj" ]; then
 fi
 
 # ── Build ────────────────────────────────────────────────────────────────────
-echo "  ↓  Building widget…"
+# Every build needs a distinct CFBundleVersion. chronod treats an extension
+# at an unchanged bundle version as unchanged: it keeps serving its cached
+# render and never asks for a new timeline, so a rebuild at the same version
+# leaves a stale widget - or, on a freshly placed one, a widget stuck on its
+# placeholder. Restarting chronod, re-registering, and removing and re-adding
+# the widget do not clear it; only a version change does. A timestamp is
+# monotonic and always differs, which is all that matters here.
+BUILD_NUMBER=$(date +%s)
+
+echo "  ↓  Building widget… (build $BUILD_NUMBER)"
 xcodebuild \
     -project "$PROJECT_DIR/AIQuotaBarWidget.xcodeproj" \
     -scheme AIQuotaBarHost \
@@ -55,6 +64,7 @@ xcodebuild \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGNING_ALLOWED=NO \
     DEVELOPMENT_TEAM="" \
+    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
     2>&1 | tail -5
 
 # ── Sign ─────────────────────────────────────────────────────────────────────
