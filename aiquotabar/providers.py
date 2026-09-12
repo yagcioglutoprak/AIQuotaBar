@@ -245,22 +245,42 @@ def _chatgpt_access_token(cookies: dict) -> str | None:
     return data.get("accessToken")
 
 
-def _parse_wham_window(window: dict, label: str) -> LimitRow | None:
-    """Parse a single rate-limit window dict into a LimitRow."""
-    if not window or not isinstance(window, dict):
+def _parse_wham_window(pw: dict | None, label: str) -> LimitRow | None:
+    """Parse a single primary/secondary window dict into a LimitRow."""
+    if not pw or not isinstance(pw, dict):
         return None
-    pw = window.get("primary_window") or {}
     pct = min(100, int(pw.get("used_percent", 0)))
     reset_str = _fmt_reset(pw.get("reset_at")) if pw.get("reset_at") else ""
     return LimitRow(label, pct, reset_str)
 
 
+def _parse_wham_bucket(bucket: dict, label: str) -> list[LimitRow]:
+    """Parse a rate-limit bucket into its 5h and weekly rows.
+
+    Each bucket (`rate_limit`, `code_review_rate_limit`, and any entry in
+    `additional_rate_limits`) carries a `primary_window` (5h) and a
+    `secondary_window` (7-day/weekly) - Codex's own UI shows both, this app
+    used to surface only the primary one.
+    """
+    if not bucket or not isinstance(bucket, dict):
+        return []
+    rows = []
+    row = _parse_wham_window(bucket.get("primary_window"), label)
+    if row is not None:
+        rows.append(row)
+    row = _parse_wham_window(bucket.get("secondary_window"), f"{label} (Weekly)")
+    if row is not None:
+        rows.append(row)
+    return rows
+
+
 def _parse_wham_usage(data: dict) -> ProviderData:
     """Parse /backend-api/wham/usage response.
 
-    Confirmed shape (2026-02):
-      rate_limit.primary_window.used_percent  (0-100)
-      rate_limit.primary_window.reset_at      (Unix timestamp)
+    Confirmed shape (2026-02, re-confirmed 2026-09):
+      rate_limit.primary_window.used_percent    (0-100, 5h)
+      rate_limit.secondary_window.used_percent  (0-100, weekly)
+      rate_limit.{primary,secondary}_window.reset_at  (Unix timestamp)
       code_review_rate_limit  -- same structure
     """
     log.debug("wham/usage raw: %s", json.dumps(data, indent=2))
@@ -272,17 +292,13 @@ def _parse_wham_usage(data: dict) -> ProviderData:
         "code_review_rate_limit": "Code Review",
     }
     for key, label in label_map.items():
-        row = _parse_wham_window(data.get(key), label)
-        if row is not None:
-            rows.append(row)
+        rows.extend(_parse_wham_bucket(data.get(key), label))
 
     # additional_rate_limits may be a list of extra buckets
     for extra in (data.get("additional_rate_limits") or []):
         if isinstance(extra, dict):
             name = extra.get("name") or extra.get("type") or "Extra"
-            row = _parse_wham_window(extra, name.replace("_", " ").title())
-            if row:
-                rows.append(row)
+            rows.extend(_parse_wham_bucket(extra, name.replace("_", " ").title()))
 
     if not rows:
         return ProviderData("ChatGPT", error="No rate limit data in response")
