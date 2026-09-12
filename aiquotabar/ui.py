@@ -1282,14 +1282,9 @@ class _SharePopover:
             if data and data.session:
                 parts.append(f"Claude {data.session.pct}%")
             for pd in self.app._provider_data:
-                if pd.error:
-                    continue
-                if pd._rows:
-                    best = max(r.pct for r in pd._rows if r.pct is not None) if pd._rows else None
-                    if best is not None:
-                        parts.append(f"{pd.name} {best}%")
-                elif pd.pct is not None:
-                    parts.append(f"{pd.name} {pd.pct}%")
+                best = self.app._provider_bar_pct(pd)
+                if best is not None:
+                    parts.append(f"{pd.name} {best}%")
 
             stats = " \u00b7 ".join(parts) if parts else "my AI usage"
             text = f"{stats} \u2014 tracking with AIQuotaBar"
@@ -2811,12 +2806,20 @@ class ClaudeBar(rumps.App):
         self.title = "  ".join(parts)
 
     def _provider_bar_pct(self, pd: ProviderData) -> int | None:
-        """Extract a single percentage for the menu bar from a provider."""
+        """Extract a single percentage for the menu bar from a provider.
+
+        Only the immediate-status rows count. A "(Weekly)" row is a longer
+        horizon than the bar communicates and must not be able to outrank
+        the 5h/session number - same principle Claude's own bar icon
+        already follows (driven by the session limit, never the max of
+        all limits).
+        """
         if pd.error:
             return None
         rows = getattr(pd, "_rows", None)
         if rows:
-            return max(r.pct for r in rows)
+            immediate = [r for r in rows if not r.label.endswith("(Weekly)")]
+            return max(r.pct for r in (immediate or rows))
         if pd.pct is not None:
             return pd.pct
         return None
