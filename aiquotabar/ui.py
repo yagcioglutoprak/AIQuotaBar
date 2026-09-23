@@ -293,6 +293,20 @@ class ClaudeBar(rumps.App):
     def _deferred_startup(self, timer):
         timer.stop()
         try:
+            self._startup_ui()
+        except Exception:
+            # Never let a UI problem take the app down: a crash loop at launch
+            # would also stop the auto-updater from ever delivering a fix.
+            log.exception("UI startup failed — using the text menu")
+            self._web_ok, self._panel = False, None
+            try:
+                self._nsapp.nsstatusitem.setMenu_(self._menu._menu)
+                self._rebuild_menu()
+            except Exception:
+                log.exception("fallback menu failed")
+
+    def _startup_ui(self):
+        try:
             webview.install_edit_menu()
         except Exception:
             log.debug("edit menu install failed", exc_info=True)
@@ -372,6 +386,12 @@ class ClaudeBar(rumps.App):
             self._ui_dirty = True
 
     def _flush_ui(self, _timer):
+        try:
+            self._flush_ui_once()
+        except Exception:
+            log.exception("UI update failed")
+
+    def _flush_ui_once(self):
         with self._state_lock:
             dirty, self._ui_dirty = self._ui_dirty, False
         if dirty:

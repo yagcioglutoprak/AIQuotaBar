@@ -5,7 +5,8 @@
 No Electron. No browser extension. One command to install.
 
 <p align="center">
-<img src="assets/screens/panel-dark.png" alt="AIQuotaBar panel: Claude session 78% with a pace warning, ChatGPT, Cursor and Copilot limits" width="420">
+<img src="assets/screens/panel-dark.png" alt="AIQuotaBar panel in dark mode: Claude session 78% with a pace warning, ChatGPT, Cursor and Copilot limits" width="400">
+<img src="assets/screens/panel-light.png" alt="AIQuotaBar panel in light mode" width="400">
 </p>
 <p align="center">
 <img src="assets/widget_info.gif" alt="Desktop Widget" width="600">

@@ -282,3 +282,16 @@ def test_single_instance_lock(tmp_path):
         assert entry._single_instance() is False
     finally:
         os.close(fd)
+
+
+def test_ui_failures_never_escape_timer_callbacks(ui, monkeypatch):
+    app = ui.ClaudeBar(demo=True)
+
+    def boom(*a, **k):
+        raise RuntimeError("AppKit exploded")
+    monkeypatch.setattr(ui.webview, "Panel", boom)
+    app._deferred_startup(fake_macos.Timer(None, 0))       # must not raise
+    assert app._web_ok is False and app._panel is None
+    monkeypatch.setattr(app, "_apply", boom)
+    app._post_update()
+    app._flush_ui(None)                                     # must not raise
