@@ -7,7 +7,9 @@ view model with deterministic demo data and captures each view in headless
 Chromium, placed on a macOS-style backdrop. On a Mac the app renders these
 views in WebKit with SF Pro; here we fall back to Inter if you pass --font.
 
-    pip install playwright && python3 tools/screenshots.py --out assets/screens
+    pip install playwright pillow
+    python3 tools/screenshots.py --readme        # rebuild every image the README uses
+    python3 tools/screenshots.py --out /tmp/shots   # all raw shots
 
 Only the menu bar strip above the panel is a mock; everything else is the
 app's own UI code.
@@ -78,15 +80,15 @@ def font_css(font_dir: str | None) -> str:
     return "\n".join(out) + "\n:root{--font:'Inter',sans-serif;font-feature-settings:'cv11','ss01';}"
 
 
-def menubar_html(theme: str) -> str:
+def menubar_html(theme: str, compact: bool = False) -> str:
     # A mock of the native status item: icon + % per provider, severity-coloured.
+    apps = '' if compact else '<span>Finder</span><span>File</span><span>Edit</span><span>View</span>'
     return (
-        '<div class="mb"><span style="font-weight:700"></span><span>Finder</span><span>File</span>'
-        '<span>Edit</span><span>View</span><span class="sp"></span>'
+        '<div class="mb"><span style="font-weight:700"></span>' + apps + '<span class="sp"></span>'
         '<span class="item hl"><span class="picon" data-icon="claude"></span>78%'
         '<span style="width:8px"></span><span class="picon mask" data-icon="chatgpt"></span>64%'
         '<span style="width:8px"></span><span style="opacity:.8">◆ 1.2k</span></span>'
-        '<span>Wed 23 Sep  14:32</span></div>'
+        '<span>' + ('14:32' if compact else 'Wed 23 Sep  14:32') + '</span></div>'
     )
 
 
@@ -112,6 +114,8 @@ def run(out_dir: str, font_dir: str | None, only: list[str] | None) -> list[str]
 
     shots = [
         # name, view, theme, state, scene size, placement
+        # README hero: tight frame, panel fades out at the bottom.
+        ("readme-hero", "panel", "dark", panel, (430, 640), "hero"),
         ("panel-dark", "panel", "dark", panel, (760, 920), "panel"),
         ("panel-light", "panel", "light", panel, (760, 920), "panel"),
         ("panel-states-dark", "panel", "dark", panel_states, (760, 760), "panel"),
@@ -145,13 +149,22 @@ def run(out_dir: str, font_dir: str | None, only: list[str] | None) -> list[str]
                   const scene = document.createElement('div');
                   scene.className = 'scene';
                   document.body.prepend(scene);
-                  if (placement === 'panel') {
+                  if (placement === 'panel' || placement === 'hero') {
                     scene.insertAdjacentHTML('beforeend', mb);
                     const a = document.createElement('div');
                     a.className = 'anchor';
                     a.appendChild(app);
                     scene.appendChild(a);
                     a.style.left = (w - 360) / 2 + 'px';
+                    if (placement === 'hero') {
+                      // Hang the panel under its status item, clamped to the edge like macOS does.
+                      const it = scene.querySelector('.item.hl').getBoundingClientRect();
+                      a.style.left = Math.max(8, Math.min(w - 368, it.left + it.width / 2 - 180)) + 'px';
+                      const fade = document.createElement('div');
+                      fade.style.cssText = 'position:absolute;left:0;right:0;bottom:0;height:120px;' +
+                        'background:linear-gradient(to bottom, rgba(14,16,32,0), #0e1020 92%)';
+                      scene.appendChild(fade);
+                    }
                   } else {
                     const win = document.createElement('div');
                     win.className = 'win';
@@ -179,7 +192,7 @@ def run(out_dir: str, font_dir: str | None, only: list[str] | None) -> list[str]
                     } else { el.style.backgroundImage = 'url(' + src + ')'; }
                   });
                 }""",
-                [placement, menubar_html(theme), w, hgt, view, assets["icons"]],
+                [placement, menubar_html(theme, compact=placement == "hero"), w, hgt, view, assets["icons"]],
             )
             page.wait_for_timeout(350)
             path = os.path.join(out_dir, f"{name}.png")
@@ -204,13 +217,52 @@ def run(out_dir: str, font_dir: str | None, only: list[str] | None) -> list[str]
     return written
 
 
+README_SHOTS = ["readme-hero", "panel-dark", "panel-light", "panel-states-dark",
+                "settings-menubar-dark", "history-dark", "share-card"]
+
+
+def make_readme_assets(shots: str, dest: str) -> list[str]:
+    """Crop/compress raw shots into the files README.md and the release notes use."""
+    from PIL import Image
+
+    def save(img, name, quantize=False):
+        img = img.convert("RGB")
+        if quantize:   # large, flat screenshots: 256 colours is indistinguishable
+            img = img.quantize(colors=256, method=Image.Quantize.MEDIANCUT,
+                               dither=Image.Dither.FLOYDSTEINBERG)
+        path = os.path.join(dest, name)
+        img.save(path, optimize=True)
+        return path
+
+    shot = lambda n: Image.open(os.path.join(shots, n + ".png"))  # noqa: E731
+    out = [save(shot("readme-hero"), "readme-hero.png")]
+    # Panels: 760-wide scene @2x, panel at x=200..560 CSS, just below the menu bar.
+    out.append(save(shot("panel-states-dark").crop((380, 64, 1140, 1364)), "tour-states.png"))
+    out.append(save(shot("panel-light").crop((380, 64, 1140, 1364)), "tour-light.png"))
+    # Windows: 900-wide scene @2x, window at x=60..840, y=40 CSS; same crop for both.
+    out.append(save(shot("settings-menubar-dark").crop((112, 72, 1688, 1208)), "tour-settings.png"))
+    out.append(save(shot("history-dark").crop((112, 72, 1688, 1208)), "tour-history.png"))
+    for name in ("panel-dark", "panel-light", "share-card"):
+        out.append(save(shot(name), name + ".png", quantize=True))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out", default=os.path.join(ROOT, "assets", "screens"))
+    ap.add_argument("--out", default=None, help="directory for raw shots")
     ap.add_argument("--font", help="directory with Inter latin.woff2 / latin-ext.woff2 (optional)")
     ap.add_argument("--only", nargs="*", help="render only these shot names")
+    ap.add_argument("--readme", action="store_true",
+                    help="render and write the README images into assets/screens")
     args = ap.parse_args()
-    for path in run(args.out, args.font, args.only):
+    if args.readme:
+        import tempfile
+        raw = args.out or tempfile.mkdtemp(prefix="aiquotabar-shots-")
+        run(raw, args.font, README_SHOTS)
+        for path in make_readme_assets(raw, os.path.join(ROOT, "assets", "screens")):
+            print(path)
+        return
+    for path in run(args.out or os.path.join(ROOT, "assets", "screens"), args.font, args.only):
         print(path)
 
 

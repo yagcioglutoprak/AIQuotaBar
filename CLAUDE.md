@@ -65,7 +65,7 @@ aiquotabar/
 - If WebKit can't load (or the page never reports `ready`), the app falls back to a text NSMenu.
 - Tests: `pip install -r requirements-dev.txt && python3 -m pytest` — view model, providers,
   history, the native shell against fake Cocoa modules (`tests/fake_macos.py`), and the real web
-  UI in headless Chromium. Screenshots: `python3 tools/screenshots.py`.
+  UI in headless Chromium. README images: `python3 tools/screenshots.py --readme`.
 
 ## Widget (optional)
 
@@ -134,8 +134,9 @@ Response fields:
 
 - **README is a landing page, not docs.** Hook → GIF → install command must be above the fold.
   A visitor should understand value and install in under 10 seconds.
-- **The demo GIF is the #1 driver of stars.** `assets/demo.gif` must be short, polished, and show
-  the "aha moment": menu bar icon → click → full usage breakdown with colors.
+- **The hero image is the #1 driver of stars.** `assets/screens/readme-hero.png` (menu bar item →
+  panel with a pace warning) sits next to "What you get" at the top of the README. Regenerate all
+  README images with `python3 tools/screenshots.py --readme`; record a GIF with `--demo` on a Mac.
 - **Zero-friction install is non-negotiable.**
   `curl -fsSL .../install.sh | bash` must work end-to-end without manual steps.
   If it breaks, fix it before anything else.
