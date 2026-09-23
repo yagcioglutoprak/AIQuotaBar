@@ -1,11 +1,11 @@
 # AIQuotaBar
 
-**Stop getting rate-limited by surprise.** See your Claude, ChatGPT, Cursor, and Copilot usage live in the macOS menu bar.
+**Stop getting rate-limited by surprise.** See your Claude, ChatGPT, Cursor, and Copilot usage live in the macOS menu bar — and get warned *before* you run out.
 
 No Electron. No browser extension. One command to install.
 
 <p align="center">
-<img src="assets/demo.gif" alt="Menu Bar" width="380">
+<img src="assets/screens/panel-dark.png" alt="AIQuotaBar panel: Claude session 78% with a pace warning, ChatGPT, Cursor and Copilot limits" width="420">
 </p>
 <p align="center">
 <img src="assets/widget_info.gif" alt="Desktop Widget" width="600">
@@ -46,49 +46,22 @@ I kept getting cut off mid-session on Claude Pro with zero warning. Claude.ai do
 
 | Menu bar | Meaning |
 |---|---|
-| 🟢 12% | Session usage is low — you're good |
-| 🟡 83% | Approaching the 5-hour limit |
-| 🔴 100% | Rate-limited — shows time until reset |
-| 🔴 100% · | Session is fine but weekly limit is maxed |
+| `78%` | Session usage — plain when you're fine |
+| `83%` in orange | Past your warning threshold (80% by default) |
+| `100%` in red | Rate-limited — the panel shows when you're back |
+| `78% ·` | Session is fine but a weekly limit is maxed |
 
-Open the menu for full detail:
+Click it for the panel: every limit with its reset countdown, a **pace marker** (where an even pace would put you), a "runs out in ~1h at this pace" warning, and a 24-hour trend.
 
-```
-CLAUDE
+<p align="center">
+<img src="assets/screens/panel-states.png" alt="Limit reached, running low and signed-out states" width="270">
+<img src="assets/screens/history.png" alt="Usage history window" width="270">
+<img src="assets/screens/settings.png" alt="Settings window" width="270">
+</p>
 
-  🟢 Current Session
-  ██░░░░░░░░░░░░  12%
-  resets in 3h 41m
+**Share it** — one click turns your current limits into an image for X, Slack or a README:
 
-  🟡 All Models
-  ████████████░░  83%
-  resets Wed 23:00
-
-  🟢 Sonnet Only
-  ███░░░░░░░░░░░  22%
-  resets Wed 23:00
-
-CHATGPT
-
-  🟢 Codex Tasks
-  █░░░░░░░░░░░░░  0%
-  resets Thu 05:38
-
-GITHUB COPILOT
-
-  0 / 300 this month
-  █░░░░░░░░░░░░░  0%
-
-CURSOR
-
-  🟢 Auto
-  █░░░░░░░░░░░░░  0%
-  resets in 27d
-
-  🟢 API
-  █░░░░░░░░░░░░░  0%
-  resets in 27d
-```
+<p align="center"><img src="assets/screens/share-card.png" alt="Share card" width="600"></p>
 
 ---
 
@@ -114,17 +87,14 @@ cd AIQuotaBarWidget && ./build_widget.sh
 
 ## Features
 
-- **Zero-setup auth** — reads cookies directly from your browser (Chrome, Arc, Brave, Edge, Firefox, Safari)
-- **Claude + ChatGPT + Cursor + Copilot** — tracks Claude.ai session/weekly limits, ChatGPT rate limits, Cursor Auto/API usage, and GitHub Copilot premium requests — all in one place
-- **Desktop widget** — native macOS WidgetKit widget with brand-colored progress bars
-- **Multi-provider** — add OpenAI, MiniMax, GLM (Zhipu) API keys to see spending alongside usage
-- **Burn rate + ETA** — predicts when you'll hit each limit based on your current pace
-- **Pacing alerts** — notifies you when you're on track to hit a limit within 30 minutes
-- **Auto-refresh on session expiry** — silently grabs fresh cookies when your session expires
-- **macOS notifications** — alerts at 80% and 95% usage for Claude, ChatGPT, and Cursor
-- **Configurable refresh** — 1 / 5 / 15 min
-- **Runs at login** — via LaunchAgent, toggle from the menu
-- **Tiny footprint** — single-file Python app, no Electron, no background services beyond the app itself
+- **Zero-setup auth** — reuses your browser sessions (Chrome, Arc, Brave, Edge, Firefox, Safari); reconnects itself when a session expires
+- **Claude + ChatGPT + Cursor + Copilot** — Claude session/weekly (incl. Sonnet/Opus), Codex 5-hour and weekly windows, Cursor Auto/API, Copilot premium requests
+- **Pace tracking** — see whether you're ahead of an even pace, and when you'll run out before the reset
+- **Alerts you control** — warning/critical thresholds, pace alerts and reset alerts per service
+- **Usage history** — 24-hour trends, daily peaks and a 90-day activity calendar
+- **Share card** — copy or post a clean image of your limits
+- **Desktop widget** — native WidgetKit widget; plus OpenAI / MiniMax / GLM API spend
+- **Light & dark**, runs at login, one-click settings — and nothing leaves your Mac except requests to each provider
 
 ---
 
@@ -138,7 +108,7 @@ cd AIQuotaBarWidget && ./build_widget.sh
 | Desktop widget | ✅ Native WidgetKit | ❌ | ❌ |
 | Privacy | ✅ Local only | ✅ | ⚠️ Depends on extension |
 | Install | ✅ One command | ✅ Nothing | ❌ Store + permissions |
-| No Electron | ✅ Single-file Python | ✅ | ❌ Often Electron |
+| No Electron | ✅ Python + system WebKit | ✅ | ❌ Often Electron |
 
 ---
 
@@ -157,7 +127,7 @@ cd AIQuotaBarWidget && ./build_widget.sh
 git clone https://github.com/yagcioglutoprak/AIQuotaBar.git
 cd AIQuotaBar
 pip install -r requirements.txt
-python3 claude_bar.py
+python3 claude_bar.py          # or: python3 claude_bar.py --demo  (sample data, no accounts)
 ```
 
 ---
@@ -166,14 +136,7 @@ python3 claude_bar.py
 
 The app calls the same private usage API that `claude.ai/settings/usage` uses. It authenticates using your browser's existing session cookies (read locally — never transmitted anywhere except to `claude.ai`).
 
-[`curl_cffi`](https://github.com/yifeikong/curl_cffi) is used to mimic a Chrome TLS fingerprint, which is required to pass Cloudflare's bot protection.
-
-| API field | Displayed as |
-|---|---|
-| `five_hour` | Current Session |
-| `seven_day` | All Models (weekly) |
-| `seven_day_sonnet` | Sonnet Only (weekly) |
-| `extra_usage` | Extra Usage toggle |
+[`curl_cffi`](https://github.com/yifeikong/curl_cffi) mimics a browser TLS fingerprint, which Cloudflare requires. The panel is plain HTML/CSS rendered by the system's WebKit (`aiquotabar/web/`), fed by a platform-independent view model — so the UI is tested and screenshotted in CI-style headless browsers (`python3 tools/screenshots.py`).
 
 ---
 
@@ -184,11 +147,8 @@ The app calls the same private usage API that `claude.ai/settings/usage` uses. I
 tail -50 ~/.claude_bar.log
 ```
 
-**Cookies not detected**
-Make sure you're logged into [claude.ai](https://claude.ai) in your browser, then click **Auto-detect from Browser** in the menu.
-
-**Session expired / showing ◆ !**
-The app will try to auto-detect fresh cookies from your browser. If that fails, click **Set Session Cookie…**.
+**Cookies not detected / signed out**
+Log into the service in your browser, then **Settings → Accounts → Detect** (or **Reconnect** on the card). For Claude you can also paste a cookie manually there.
 
 ---
 
@@ -201,8 +161,9 @@ The app will try to auto-detect fresh cookies from your browser. If that fails, 
 - [x] Burn rate ETA + pacing alerts
 - [ ] Linux system tray support
 - [ ] Windows tray app
-- [ ] Customizable notification thresholds
-- [ ] Usage history graph
+- [x] Customizable notification thresholds
+- [x] Usage history graph
+- [x] Pace tracking + share card
 - [ ] Multiple Claude account support
 
 ---

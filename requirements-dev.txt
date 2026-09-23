@@ -1,0 +1,4 @@
+# Tests and screenshot tooling (not needed to run the app)
+pytest>=8
+playwright>=1.40
+curl_cffi>=0.7.0,<1.0

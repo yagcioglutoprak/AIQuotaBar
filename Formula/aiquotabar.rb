@@ -1,5 +1,5 @@
 class Aiquotabar < Formula
-  desc "macOS menu bar app showing live Claude.ai and ChatGPT usage limits"
+  desc "Live Claude, ChatGPT, Cursor and Copilot usage limits in the macOS menu bar"
   homepage "https://github.com/yagcioglutoprak/AIQuotaBar"
   url "https://github.com/yagcioglutoprak/AIQuotaBar/archive/refs/tags/v1.1.0.tar.gz"
   sha256 "9c875f01e4891e4483640abcf1447e172dcf66ddfc49f46df91187ea19c4f5ff"
@@ -49,6 +49,11 @@ class Aiquotabar < Formula
     sha256 "5556c87db95711b985d5efdaaf01c917ddd41d148b1e52a0c66b1a2e2c5c1640"
   end
 
+  resource "pyobjc-framework-webkit" do
+    url "https://files.pythonhosted.org/packages/14/10/110a50e8e6670765d25190ca7f7bfeecc47ec4a8c018cb928f4f82c56e04/pyobjc_framework_webkit-12.1.tar.gz"
+    sha256 "97a54dd05ab5266bd4f614e41add517ae62cdd5a30328eabb06792474b37d82a"
+  end
+
   resource "browser-cookie3" do
     url "https://files.pythonhosted.org/packages/e0/e1/652adea0ce25948e613ef78294c8ceaf4b32844aae00680d3a1712dde444/browser_cookie3-0.20.1.tar.gz"
     sha256 "6d8d0744bf42a5327c951bdbcf77741db3455b8b4e840e18bab266d598368a12"
@@ -72,7 +77,7 @@ class Aiquotabar < Formula
       end
     end
 
-    libexec.install "claude_bar.py"
+    libexec.install "claude_bar.py", "aiquotabar"
     (libexec/"assets").install Dir["assets/*"]
 
     # Fix rumps notification crash (requires CFBundleIdentifier in Info.plist)
@@ -102,5 +107,6 @@ class Aiquotabar < Formula
 
   test do
     system "#{libexec}/venv/bin/python", "-m", "py_compile", "#{libexec}/claude_bar.py"
+    assert_match "AIQuotaBar", shell_output("#{bin}/aiquotabar --version")
   end
 end
