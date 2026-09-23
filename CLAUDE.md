@@ -38,23 +38,34 @@ Every change must either (a) convert more visitors to stars, (b) bring new visit
 
 ## What this is
 
-A native macOS menu bar app (Python + rumps) that shows live Claude, ChatGPT, Cursor, and GitHub Copilot usage limits. It reads cookies from the user's browser (no manual copy-paste), calls provider APIs, and displays the result as a status bar icon (`🟢 4%`, `🟡 83%`, `🔴 100%`).
+A native macOS menu bar app (Python + rumps) that shows live Claude, ChatGPT, Cursor, and GitHub Copilot usage limits. It reads cookies from the user's browser (no manual copy-paste), calls provider APIs, and shows brand icon + percentage per provider in the status bar (orange/red past the alert thresholds). Clicking opens a panel with every limit, reset countdowns, pace markers and warnings.
 
 ## Architecture
 
-Single file: `claude_bar.py` (~900 lines). No build step. No framework.
+`claude_bar.py` is a shim; the code is the `aiquotabar/` package. No build step.
 
 ```
-claude_bar.py
-├── Config         load_config / save_config  (~/.claude_bar_config.json)
-├── Claude API     fetch_raw → _get / _org_id_from_api
-├── Provider APIs  fetch_openai / fetch_minimax / fetch_glm → ProviderData
-│                  PROVIDER_REGISTRY: cfg_key → (name, fetch_fn)
-├── Parser         parse_usage → UsageData(session, weekly_all, weekly_sonnet)
-├── Display        _bar / _status_icon / _row_lines / _provider_lines
-├── Cookie mgmt    _auto_detect_cookies → browser-cookie3 (Firefox first, then Chromium)
-└── App            ClaudeBar(rumps.App) — timer, menu rebuild, callbacks
+aiquotabar/
+├── config.py     config + thresholds (~/.claude_bar_config.json), logging
+├── theme.py      provider identity: names, brand colours, icons (single source)
+├── providers.py  fetchers → UsageData / ProviderData; LimitRow has resets_at + window_secs
+├── history.py    burn rate (short-term JSON) + SQLite samples/daily stats + 24h trends
+├── viewmodel.py  PURE PYTHON: app state (Snapshot) → JSON for the UI; settings allow-list
+├── web/          index.html + app.css + app.js — panel, settings, history, welcome, share card
+├── webview.py    WKWebView host, NSPanel, windows, JS↔Python bridge (only WebKit code)
+├── ui.py         ClaudeBar(rumps.App): fetch loop, alerts, status title, bridge actions
+├── demo.py       deterministic sample data (--demo, screenshots, tests)
+├── widget.py / update.py   WidgetKit cache, git auto-update
+└── __main__.py   entry: --demo, --history, --version, single-instance lock
 ```
+
+- The page only renders `AIQ.render(state)` and posts `{action: ...}` messages; Python validates
+  every action (`viewmodel.apply_setting` allow-list, `ui._safe_url` host allow-list). Untrusted
+  text is rendered with `textContent`, never `innerHTML`.
+- If WebKit can't load (or the page never reports `ready`), the app falls back to a text NSMenu.
+- Tests: `pip install -r requirements-dev.txt && python3 -m pytest` — view model, providers,
+  history, the native shell against fake Cocoa modules (`tests/fake_macos.py`), and the real web
+  UI in headless Chromium. Screenshots: `python3 tools/screenshots.py`.
 
 ## Widget (optional)
 
@@ -72,12 +83,16 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
 
 1. Write `fetch_myprovider(api_key: str) -> ProviderData` — return `ProviderData` with `spent`/`limit` or `balance`
 2. Add one entry to `PROVIDER_REGISTRY`: `"myprovider_key": ("MyProvider", fetch_myprovider)`
-3. That's it — the menu item, key dialog, and display are all automatic.
+3. That's it for API-key providers — Settings → Accounts and the panel's extra rows pick it up.
+   A quota provider with its own card also needs an entry in `theme.PROVIDERS` / `PROVIDER_ORDER`,
+   `viewmodel.COOKIE_KEYS` and a detector in `ui.DETECTORS`. Set `resets_at`/`window_secs` on
+   rows so the pace marker works.
 
 ## Key decisions to preserve
 
-- **Session (5-hour) drives the status bar icon**, not the max of all limits.
-  Weekly limits appear in the menu only. Rationale: session determines immediate access.
+- **Session (5-hour) drives the Claude status bar number**, not the max of all limits.
+  Weekly limits appear in the panel (a trailing `·` marks a maxed weekly limit). The panel's hero
+  card, by contrast, shows the *binding* constraint across all providers.
 - **Firefox/LibreWolf first** in browser detection order — no Keychain prompt, zero friction.
   Chromium browsers (Arc, Chrome, Brave) come after; they need one-time "Always Allow".
 - **API utilization scale is now consistent**: all fields (`five_hour`, `seven_day`,
@@ -106,9 +121,11 @@ Response fields:
 
 | File            | Purpose                                              |
 |-----------------|------------------------------------------------------|
-| `claude_bar.py` | Entire application                                   |
+| `claude_bar.py` | Entry shim → `aiquotabar/__main__.py`                |
 | `install.sh`    | One-line curl installer (detects Python, LaunchAgent)|
-| `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`           |
+| `requirements.txt` | `rumps`, `curl_cffi`, `browser-cookie3`, `pyobjc-framework-WebKit` |
+| `aiquotabar/web/` | The UI (HTML/CSS/JS, no build step, no remote assets) |
+| `tests/`, `tools/` | pytest suite; screenshot generator                 |
 | `setup.sh`      | Legacy manual installer (kept for reference)         |
 | `assets/`       | demo.gif and screenshots for README                  |
 | `AIQuotaBarWidget/` | Optional WidgetKit desktop widget (Xcode project)   |
@@ -146,8 +163,11 @@ These features would make the app significantly more shareable:
 ## Dev workflow
 
 ```bash
-# Run locally
+# Run locally (add --demo for sample data without accounts)
 python3 claude_bar.py
+
+# Tests (Linux or macOS)
+python3 -m pytest
 
 # Check logs
 tail -f ~/.claude_bar.log
@@ -164,6 +184,8 @@ pkill -f claude_bar.py; sleep 1; python3 claude_bar.py &
 - Do not add a `session_key` field — the app uses full cookie strings, not just the session key.
 - Do not multiply utilization values by 100 — all fields now return 0–100 percentages directly.
 - Do not call `rumps.notification()` directly — always use `_notify()`.
+- Do not load remote scripts, fonts or images in `aiquotabar/web/` (CSP blocks them anyway), and
+  never put untrusted text into `innerHTML`.
 - Do not store cookies in plaintext anywhere other than `~/.claude_bar_config.json` (which is gitignored).
 - Do not add Electron, a web server, or any always-on background process beyond the menu bar app itself.
 - Do not make the README longer than it already is — trim if anything.

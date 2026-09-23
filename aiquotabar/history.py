@@ -1,4 +1,4 @@
-"""Usage history tracking -- burn rate, sparklines, SQLite persistence."""
+"""Usage history tracking -- burn rate, 24h trends, SQLite persistence."""
 
 import json
 import math
@@ -7,18 +7,10 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from aiquotabar.config import (
-    log, HISTORY_FILE, HISTORY_MAX_AGE, HISTORY_DB,
+    HISTORY_FILE, HISTORY_MAX_AGE, HISTORY_DB,
     SAMPLES_MAX_DAYS, DAILY_MAX_DAYS, LIMIT_HIT_PCT,
-    BURN_WINDOW, MIN_SPAN_SECS, RESET_DROP_PCT, HISTORY_COLORS,
+    BURN_WINDOW, MIN_SPAN_SECS, RESET_DROP_PCT,
 )
-
-
-def _nscolor(hex_str: str, alpha: float = 1.0):
-    """Convert a hex color string like '#D97757' to an NSColor."""
-    from AppKit import NSColor
-    h = hex_str.lstrip("#")
-    r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
-    return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, alpha)
 
 
 def _load_history() -> dict:
@@ -55,7 +47,7 @@ def _append_history(history: dict, key: str, pct: int):
     history[key] = [e for e in entries if e["t"] >= cutoff]
 
 
-def _calc_burn_rate(history: dict, key: str) -> float | None:
+def _calc_burn_rate(history: dict, key: str, now: float | None = None) -> float | None:
     """Recency-weighted linear regression over the last 30 min.
 
     Uses exponential decay weighting (half-life = 10 min) so recent
@@ -68,9 +60,10 @@ def _calc_burn_rate(history: dict, key: str) -> float | None:
     entries = history.get(key, [])
     if len(entries) < 2:
         return None
-    now = datetime.now(timezone.utc).timestamp()
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
     cutoff = now - BURN_WINDOW
-    recent = [e for e in entries if e["t"] >= cutoff]
+    # Ignore points from the future (clock changes) — they'd blow up the weights.
+    recent = [e for e in entries if cutoff <= e["t"] <= now + 60]
     if len(recent) < 2:
         return None
 
@@ -109,7 +102,7 @@ def _calc_burn_rate(history: dict, key: str) -> float | None:
     return slope * 60  # pct per minute
 
 
-def _calc_eta_minutes(history: dict, key: str) -> int | None:
+def _calc_eta_minutes(history: dict, key: str, now: float | None = None) -> int | None:
     """Estimate minutes until 100% based on burn rate.
 
     Returns None if burn rate is non-positive or ETA > 10 hours.
@@ -118,7 +111,7 @@ def _calc_eta_minutes(history: dict, key: str) -> int | None:
     if not entries:
         return None
     current_pct = entries[-1]["pct"]
-    rate = _calc_burn_rate(history, key)
+    rate = _calc_burn_rate(history, key, now)
     if rate is None or rate <= 0:
         return None
     remaining = 100 - current_pct
@@ -128,32 +121,6 @@ def _calc_eta_minutes(history: dict, key: str) -> int | None:
     if eta > 600:  # > 10 hours
         return None
     return max(1, round(eta))
-
-
-def _fmt_eta(minutes: int) -> str:
-    """Format ETA: 47 -> '47 min', 90 -> '1h 30 min', 360 -> '6h 0 min'."""
-    if minutes < 60:
-        return f"{minutes} min"
-    h, m = divmod(minutes, 60)
-    return f"{h}h {m} min"
-
-
-def _sparkline(history: dict, key: str, width: int = 20) -> str:
-    """Render a sparkline from history using block chars.
-
-    Returns empty string if fewer than 3 points or no meaningful variation.
-    """
-    entries = history.get(key, [])
-    if len(entries) < 3:
-        return ""
-    blocks = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-    pts = [e["pct"] for e in entries[-width:]]
-    lo, hi = min(pts), max(pts)
-    # Skip if all values are the same (no variation -> flat line looks bad)
-    if hi - lo < 2:
-        return ""
-    span = hi - lo
-    return "".join(blocks[min(7, int((p - lo) / span * 7))] for p in pts)
 
 
 # -- SQLite history functions --------------------------------------------------
@@ -196,9 +163,11 @@ def _rollup_daily_stats(conn: sqlite3.Connection):
     """Aggregate completed days from samples into daily_stats, then prune old data."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Find all distinct dates in samples that are before today
+    # Completed days that have not been rolled up yet. Samples are kept for
+    # SAMPLES_MAX_DAYS after rollup so the 24h trend chart spans midnight.
     rows = conn.execute(
-        "SELECT DISTINCT date(ts, 'unixepoch') AS d FROM samples WHERE d < ? ORDER BY d",
+        "SELECT DISTINCT date(ts, 'unixepoch') AS d FROM samples "
+        "WHERE d < ? AND d NOT IN (SELECT DISTINCT date FROM daily_stats) ORDER BY d",
         (today,),
     ).fetchall()
 
@@ -220,9 +189,6 @@ def _rollup_daily_stats(conn: sqlite3.Connection):
                     peak_pct=excluded.peak_pct, avg_pct=excluded.avg_pct,
                     limit_hits=excluded.limit_hits, samples=excluded.samples
             """, (day, key, peak, avg, hits, cnt))
-
-        # Delete rolled-up samples
-        conn.execute("DELETE FROM samples WHERE date(ts, 'unixepoch') = ?", (day,))
 
     # Prune old data
     cutoff_samples = (datetime.now(timezone.utc) - timedelta(days=SAMPLES_MAX_DAYS)).timestamp()
@@ -253,26 +219,34 @@ def _get_week_limit_hits(conn: sqlite3.Connection, key: str) -> int:
         "SELECT COALESCE(SUM(limit_hits), 0) FROM daily_stats WHERE key = ? AND date >= ?",
         (key, cutoff),
     ).fetchone()
-    # Also count today's samples that are at limit
-    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=7)).timestamp()
+    # Also count today's samples that are at limit (past days are in daily_stats)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_row = conn.execute(
-        "SELECT COUNT(*) FROM samples WHERE key = ? AND pct >= ? AND ts >= ?",
-        (key, LIMIT_HIT_PCT, cutoff_ts),
+        "SELECT COUNT(*) FROM samples WHERE key = ? AND pct >= ? "
+        "AND date(ts, 'unixepoch') = ?",
+        (key, LIMIT_HIT_PCT, today),
     ).fetchone()
     return (row[0] if row else 0) + (today_row[0] if today_row else 0)
 
 
-def _weekly_sparkline(daily_stats: list[dict], width: int = 7) -> str:
-    """Render a 7-day sparkline from daily peak values."""
-    if len(daily_stats) < 2:
-        return ""
-    blocks = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-    pts = [d["peak_pct"] for d in daily_stats[-width:]]
-    lo, hi = min(pts), max(pts)
-    if hi - lo < 2:
-        return ""
-    span = hi - lo
-    return "".join(blocks[min(7, int((p - lo) / span * 7))] for p in pts)
+def get_trend(conn: sqlite3.Connection, key: str, hours: int = 24,
+              max_points: int = 96) -> list[tuple[float, int]]:
+    """Samples for `key` over the last `hours`, bucketed to at most max_points
+    (keeping each bucket's peak so short spikes survive downsampling)."""
+    since = datetime.now(timezone.utc).timestamp() - hours * 3600
+    rows = conn.execute(
+        "SELECT ts, pct FROM samples WHERE key = ? AND ts >= ? ORDER BY ts",
+        (key, since),
+    ).fetchall()
+    if len(rows) <= max_points:
+        return [(float(t), int(p)) for t, p in rows]
+    bucket = hours * 3600 / max_points
+    out: dict[int, tuple[float, int]] = {}
+    for t, p in rows:
+        b = int((t - since) // bucket)
+        if b not in out or p >= out[b][1]:
+            out[b] = (float(t), int(p))
+    return [out[b] for b in sorted(out)]
 
 
 def _get_today_stats(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -292,121 +266,6 @@ def _get_today_stats(conn: sqlite3.Connection) -> dict[str, dict]:
             "limit_hits": hits, "samples": cnt,
         }
     return result
-
-
-def _fetch_history_data(conn: sqlite3.Connection) -> dict | None:
-    """Gather all history data for the Usage History window."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    cutoff_90 = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
-
-    # All daily_stats rows within 90 days
-    past_rows = conn.execute(
-        "SELECT date, key, peak_pct, avg_pct, limit_hits, samples "
-        "FROM daily_stats WHERE date >= ? ORDER BY date",
-        (cutoff_90,),
-    ).fetchall()
-
-    # Today's live data
-    today_stats = _get_today_stats(conn)
-
-    # Merge into per-key and per-day structures
-    per_key: dict[str, list[dict]] = {}
-    per_day: dict[str, int] = {}  # date -> max avg across all providers (daily metric)
-    per_day_detail: dict[str, dict] = {}  # date -> {key: {peak_pct, avg_pct}}
-
-    for date, key, peak, avg, hits, cnt in past_rows:
-        per_key.setdefault(key, []).append({
-            "date": date, "peak_pct": peak, "avg_pct": avg,
-            "limit_hits": hits, "samples": cnt,
-        })
-        per_day[date] = max(per_day.get(date, 0), avg)
-        per_day_detail.setdefault(date, {})[key] = {"peak_pct": peak, "avg_pct": avg}
-
-    for key, stat in today_stats.items():
-        per_key.setdefault(key, []).append(stat)
-        per_day[today] = max(per_day.get(today, 0), stat["avg_pct"])
-        per_day_detail.setdefault(today, {})[key] = {
-            "peak_pct": stat["peak_pct"], "avg_pct": stat["avg_pct"],
-        }
-
-    # Intraday 5-hour windows for today (from raw samples)
-    today_windows: dict[str, dict[int, int]] = {}
-    try:
-        raw = conn.execute(
-            "SELECT key, ts, pct FROM samples WHERE date(ts, 'unixepoch') = ? ORDER BY ts",
-            (today,),
-        ).fetchall()
-        for key, ts, pct in raw:
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-            widx = min(dt.hour // 5, 4)
-            bucket = today_windows.setdefault(key, {})
-            bucket[widx] = max(bucket.get(widx, 0), pct)
-    except Exception:
-        log.debug("Failed to fetch intraday windows", exc_info=True)
-
-    if not per_day:
-        return None
-
-    # Build provider summaries
-    _day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    providers = []
-    for key in sorted(per_key):
-        stats = per_key[key]
-        peaks = [d["peak_pct"] for d in stats]
-        avgs = [d["avg_pct"] for d in stats]
-        avg_val = round(sum(avgs) / len(avgs)) if avgs else 0
-        peak_val = max(peaks) if peaks else 0
-        total_hits = sum(d["limit_hits"] for d in stats)
-        # Color: use parent provider color for sub-keys
-        color = HISTORY_COLORS.get(key)
-        if color is None:
-            for prefix in ("chatgpt", "cursor", "claude", "copilot"):
-                if key.startswith(prefix):
-                    color = HISTORY_COLORS[prefix]
-                    break
-            else:
-                color = "#AAAAAA"
-        label = (key.replace("_", " ").title()
-                 .replace("Chatgpt", "ChatGPT").replace("Api", "API"))
-
-        # Last 7 days for bar chart
-        cutoff_7 = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
-        weekly = [d for d in stats if d["date"] >= cutoff_7]
-
-        providers.append({
-            "key": key, "label": label, "color": color,
-            "weekly": weekly, "avg": avg_val, "peak": peak_val, "hits": total_hits,
-        })
-
-    # Summary
-    all_peaks = list(per_day.items())
-    highest = max(all_peaks, key=lambda x: x[1])
-    lowest = min(all_peaks, key=lambda x: x[1])
-    avg_overall = round(sum(v for _, v in all_peaks) / len(all_peaks)) if all_peaks else 0
-    total_hits = sum(p["hits"] for p in providers)
-    earliest = min(per_day.keys())
-
-    def _fmt_day(date_str):
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            return f"{_day_names[dt.weekday()]} {dt.strftime('%b %d')}"
-        except Exception:
-            return date_str
-
-    return {
-        "days": per_day,
-        "providers": providers,
-        "per_day_detail": per_day_detail,
-        "today_windows": today_windows,
-        "summary": {
-            "total_days": len(per_day),
-            "earliest": earliest,
-            "highest": (_fmt_day(highest[0]), highest[1]),
-            "lowest": (_fmt_day(lowest[0]), lowest[1]),
-            "avg": avg_overall,
-            "total_hits": total_hits,
-        },
-    }
 
 
 def cli_history():

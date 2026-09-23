@@ -5,6 +5,8 @@ import os
 import logging
 import logging.handlers
 
+from aiquotabar import theme as _theme
+
 # ── logging ──────────────────────────────────────────────────────────────────
 
 LOG_FILE = os.path.expanduser("~/.claude_bar.log")
@@ -26,8 +28,8 @@ REFRESH_INTERVALS = {
 }
 DEFAULT_REFRESH = 300
 
-WARN_THRESHOLD = 80   # notify when any limit crosses this %
-CRIT_THRESHOLD = 95   # title turns red emoji above this %
+WARN_THRESHOLD = 80   # default: notify when any limit crosses this %
+CRIT_THRESHOLD = 95   # default: critical alert + red status above this %
 
 WIDGET_HOST_APP = "/Applications/AIQuotaBarHost.app"
 WIDGET_CACHE_DIR = os.path.expanduser(
@@ -65,10 +67,7 @@ MIN_SPAN_SECS = 5 * 60      # need >=5 min of data before showing ETA
 RESET_DROP_PCT = 30          # pct drop that signals a reset
 UPDATE_CHECK_INTERVAL = 4 * 3600   # check for updates every 4 hours
 
-HISTORY_COLORS = {
-    "claude": "#D97757", "chatgpt": "#74AA9C",
-    "copilot": "#6E40C9", "cursor": "#00A0D1",
-}
+HISTORY_COLORS = {pid: p["color"] for pid, p in _theme.PROVIDERS.items()}
 
 
 # ── config persistence ───────────────────────────────────────────────────────
@@ -104,3 +103,22 @@ def set_notif(cfg: dict, key: str, value: bool):
     """Persist a single notification toggle."""
     cfg.setdefault("notifications", {})[key] = value
     save_config(cfg)
+
+
+def thresholds(cfg: dict) -> tuple[int, int]:
+    """Return the user's (warn, crit) percentages, falling back to defaults."""
+    warn = cfg.get("warn_threshold", WARN_THRESHOLD)
+    crit = cfg.get("crit_threshold", CRIT_THRESHOLD)
+    if not isinstance(warn, int) or not isinstance(crit, int) or not 0 < warn < crit <= 100:
+        return WARN_THRESHOLD, CRIT_THRESHOLD
+    return warn, crit
+
+
+def severity(pct: int, cfg: dict) -> str:
+    """Map a usage percentage to 'ok' / 'warn' / 'crit'."""
+    warn, crit = thresholds(cfg)
+    if pct >= crit:
+        return "crit"
+    if pct >= warn:
+        return "warn"
+    return "ok"

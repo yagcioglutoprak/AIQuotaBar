@@ -28,6 +28,8 @@ class LimitRow:
     label: str
     pct: int          # 0–100
     reset_str: str    # e.g. "resets in 1h 23m" or "resets Thu 00:00"
+    resets_at: float | None = None    # unix timestamp of the next reset
+    window_secs: int | None = None    # length of the limit window (5h, 7d, ...)
 
 
 @dataclass
@@ -35,6 +37,7 @@ class UsageData:
     session: LimitRow | None = None
     weekly_all: LimitRow | None = None
     weekly_sonnet: LimitRow | None = None
+    weekly_opus: LimitRow | None = None
     overages_enabled: bool | None = None
     raw: dict = field(default_factory=dict)
 
@@ -49,6 +52,9 @@ class ProviderData:
     currency: str = "USD"
     period: str = "this month"
     error: str | None = None
+    reset_str: str = ""
+    resets_at: float | None = None
+    window_secs: int | None = None
     _rows: list = field(default_factory=list, repr=False)
 
     @property
@@ -160,47 +166,79 @@ def fetch_raw(cookie_str: str) -> dict:
 
 _DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+HOUR = 3600
+DAY = 24 * HOUR
 
-def _fmt_reset(val) -> str:
-    if val is None:
-        return ""
+
+def _parse_ts(val) -> float | None:
+    """Parse a unix timestamp or ISO-8601 string into a unix timestamp."""
+    if val is None or val == "":
+        return None
     try:
         if isinstance(val, (int, float)):
-            dt = datetime.fromtimestamp(val, tz=timezone.utc)
-        else:
-            s = str(val).rstrip("Z")
-            if "+" not in s[10:] and s[-6] != "+":
-                s += "+00:00"
-            dt = datetime.fromisoformat(s)
-        now = datetime.now(timezone.utc)
-        delta = dt - now
-        secs = delta.total_seconds()
-        if secs <= 0:
-            return "resets soon"
-        if secs < 3600 * 20:
-            h, rem = divmod(int(secs), 3600)
-            m = rem // 60
-            if h > 0:
-                return f"resets in {h}h {m}m"
-            return f"resets in {m}m"
-        day = _DAYS[dt.weekday()]
-        return f"resets {day} {dt.strftime('%H:%M')}"
-    except Exception:
-        log.debug("_fmt_reset failed for %r", val, exc_info=True)
-        return str(val)[:20]
+            # Some APIs report milliseconds.
+            return float(val) / 1000.0 if val > 1e11 else float(val)
+        s = str(val).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        log.debug("_parse_ts failed for %r", val)
+        return None
+
+
+def fmt_reset_ts(ts: float | None, now: float | None = None) -> str:
+    """'resets in 2h 14m' for resets within 20h, else 'resets Thu 09:00'
+    (in the user's local time zone)."""
+    if ts is None:
+        return ""
+    now = time.time() if now is None else now
+    secs = ts - now
+    if secs <= 0:
+        return "resets soon"
+    if secs < 20 * HOUR:
+        h, rem = divmod(int(secs), 3600)
+        m = rem // 60
+        if h > 0:
+            return f"resets in {h}h {m}m"
+        return f"resets in {max(1, m)}m"
+    if secs < 6 * DAY:
+        dt = datetime.fromtimestamp(ts).astimezone()
+        return f"resets {_DAYS[dt.weekday()]} {dt.strftime('%H:%M')}"
+    days = int(secs // DAY)
+    return f"resets in {days}d"
+
+
+def _fmt_reset(val) -> str:
+    ts = _parse_ts(val)
+    if ts is None:
+        return "" if val is None else str(val)[:20]
+    return fmt_reset_ts(ts)
 
 
 # ── parser ────────────────────────────────────────────────────────────────────
+
+_CLAUDE_WINDOWS = {
+    "five_hour": 5 * HOUR,
+    "seven_day": 7 * DAY,
+    "seven_day_sonnet": 7 * DAY,
+    "seven_day_opus": 7 * DAY,
+}
+
 
 def _row(data: dict, key: str, label: str) -> LimitRow | None:
     bucket = data.get(key)
     if not bucket or not isinstance(bucket, dict):
         return None
-    raw = float(bucket.get("utilization", 0))
+    raw = float(bucket.get("utilization") or 0)
     # API returns 0-100 percentage for all fields (five_hour, seven_day, etc.)
-    pct = min(100, round(raw))
-    reset = _fmt_reset(bucket.get("resets_at"))
-    return LimitRow(label, pct, reset)
+    pct = max(0, min(100, round(raw)))
+    resets_at = _parse_ts(bucket.get("resets_at"))
+    return LimitRow(label, pct, fmt_reset_ts(resets_at), resets_at,
+                    _CLAUDE_WINDOWS.get(key))
 
 
 def parse_usage(raw: dict) -> UsageData:
@@ -219,6 +257,7 @@ def parse_usage(raw: dict) -> UsageData:
         session=_row(u, "five_hour", "Current Session"),
         weekly_all=_row(u, "seven_day", "All Models"),
         weekly_sonnet=_row(u, "seven_day_sonnet", "Sonnet Only"),
+        weekly_opus=_row(u, "seven_day_opus", "Opus Only"),
         overages_enabled=overages,
         raw=raw,
     )
@@ -245,14 +284,40 @@ def _chatgpt_access_token(cookies: dict) -> str | None:
     return data.get("accessToken")
 
 
+def _wham_limit_row(w: dict, label: str) -> LimitRow | None:
+    """Build a LimitRow from one {used_percent, reset_at, limit_window_seconds} dict."""
+    if not isinstance(w, dict) or "used_percent" not in w:
+        return None
+    pct = max(0, min(100, int(round(float(w.get("used_percent") or 0)))))
+    resets_at = _parse_ts(w.get("reset_at"))
+    if resets_at is None and w.get("reset_after_seconds") is not None:
+        try:
+            resets_at = time.time() + float(w["reset_after_seconds"])
+        except (TypeError, ValueError):
+            resets_at = None
+    window = w.get("limit_window_seconds")
+    window = int(window) if isinstance(window, (int, float)) and window > 0 else None
+    return LimitRow(label, pct, fmt_reset_ts(resets_at), resets_at, window)
+
+
 def _parse_wham_window(window: dict, label: str) -> LimitRow | None:
-    """Parse a single rate-limit window dict into a LimitRow."""
+    """Parse a single rate-limit window dict into a LimitRow (primary window)."""
     if not window or not isinstance(window, dict):
         return None
-    pw = window.get("primary_window") or {}
-    pct = min(100, int(pw.get("used_percent", 0)))
-    reset_str = _fmt_reset(pw.get("reset_at")) if pw.get("reset_at") else ""
-    return LimitRow(label, pct, reset_str)
+    row = _wham_limit_row(window.get("primary_window") or {}, label)
+    return row or LimitRow(label, 0, "")
+
+
+def _parse_wham_secondary(window: dict, label: str) -> LimitRow | None:
+    """Longer (usually weekly) window that Codex reports next to the 5h one."""
+    if not window or not isinstance(window, dict):
+        return None
+    sw = window.get("secondary_window")
+    if not isinstance(sw, dict):
+        return None
+    secs = sw.get("limit_window_seconds") or 0
+    suffix = "Weekly" if not secs or secs >= DAY else "Long"
+    return _wham_limit_row(sw, f"{label} {suffix}")
 
 
 def _parse_wham_usage(data: dict) -> ProviderData:
@@ -275,6 +340,9 @@ def _parse_wham_usage(data: dict) -> ProviderData:
         row = _parse_wham_window(data.get(key), label)
         if row is not None:
             rows.append(row)
+            secondary = _parse_wham_secondary(data.get(key), label)
+            if secondary is not None:
+                rows.append(secondary)
 
     # additional_rate_limits may be a list of extra buckets
     for extra in (data.get("additional_rate_limits") or []):
@@ -362,6 +430,17 @@ def fetch_glm(api_key: str) -> ProviderData:
         return ProviderData("GLM (Zhipu)", error=str(e)[:80])
 
 
+def _next_month_reset(now: datetime | None = None) -> tuple[float, int]:
+    """(timestamp of next 1st-of-month 00:00 UTC, length of this month in secs)."""
+    now = now or datetime.now(timezone.utc)
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return end.timestamp(), int((end - start).total_seconds())
+
+
 def fetch_copilot(cookie_str: str) -> ProviderData:
     """Fetch GitHub Copilot premium request usage via browser cookies."""
     cookies = parse_cookie_string(cookie_str)
@@ -381,9 +460,13 @@ def fetch_copilot(cookie_str: str) -> ProviderData:
         log.debug("copilot_usage_card: %s", json.dumps(data, indent=2))
         used = float(data.get("discountQuantity", 0))
         limit = float(data.get("userPremiumRequestEntitlement", 0))
+        # Premium request counters reset on the 1st of each month, 00:00 UTC.
+        resets_at, window = _next_month_reset()
         return ProviderData(
             "Copilot", spent=used, limit=limit or None,
             currency="", period="this month",
+            reset_str=fmt_reset_ts(resets_at), resets_at=resets_at,
+            window_secs=window,
         )
     except Exception as e:
         log.debug("fetch_copilot failed: %s", e)
@@ -411,25 +494,18 @@ def fetch_cursor(cookie_str: str) -> ProviderData:
         auto_pct = int(round(float(plan.get("autoPercentUsed", 0))))
         api_pct = int(round(float(plan.get("apiPercentUsed", 0))))
         total_pct = int(round(float(plan.get("totalPercentUsed", 0))))
-        # Build reset string from billingCycleEnd
-        reset_str = ""
-        cycle_end = data.get("billingCycleEnd")
-        if cycle_end:
-            try:
-                end_dt = datetime.fromisoformat(cycle_end.replace("Z", "+00:00"))
-                delta = end_dt - datetime.now(timezone.utc)
-                if delta.total_seconds() > 0:
-                    days = delta.days
-                    hours = delta.seconds // 3600
-                    if days > 0:
-                        reset_str = f"resets in {days}d {hours}h"
-                    else:
-                        reset_str = f"resets in {hours}h"
-            except (ValueError, TypeError):
-                pass
+        # Billing cycle: end is the reset; start (when present) gives the window.
+        resets_at = _parse_ts(data.get("billingCycleEnd"))
+        cycle_start = _parse_ts(data.get("billingCycleStart"))
+        window = None
+        if resets_at and cycle_start and resets_at > cycle_start:
+            window = int(resets_at - cycle_start)
+        elif resets_at:
+            window = 30 * DAY   # monthly plans
+        reset_str = fmt_reset_ts(resets_at)
         rows = [
-            LimitRow(label="Auto", pct=auto_pct, reset_str=reset_str),
-            LimitRow(label="API", pct=api_pct, reset_str=reset_str),
+            LimitRow("Auto", auto_pct, reset_str, resets_at, window),
+            LimitRow("API", api_pct, reset_str, resets_at, window),
         ]
         pd = ProviderData("Cursor", spent=float(total_pct), limit=100.0, currency="")
         pd._rows = rows
