@@ -101,10 +101,11 @@ echo "  ✓  Added to Login Items (runs at every login)"
 WIDGET_APP="/Applications/AIQuotaBarHost.app"
 WIDGET_INSTALLED=false
 
-if [ -d "$WIDGET_APP" ]; then
-    echo "  ✓  Desktop widget already installed"
-    WIDGET_INSTALLED=true
-elif command -v xcodebuild &>/dev/null && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AIQuotaBarWidget.xcodeproj" ]; then
+if command -v xcodebuild &>/dev/null && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AIQuotaBarWidget.xcodeproj" ]; then
+    # Always rebuild when Xcode is available, including over an existing
+    # install. Skipping when /Applications already has the app means an
+    # update never reaches the widget, leaving it rendering stale code
+    # against a freshly updated menu bar app.
     echo "  ↓  Building desktop widget (Xcode found)…"
     if bash "$INSTALL_DIR/AIQuotaBarWidget/build_widget.sh"; then
         WIDGET_INSTALLED=true
