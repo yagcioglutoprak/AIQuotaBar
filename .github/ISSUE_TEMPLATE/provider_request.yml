@@ -1,0 +1,60 @@
+name: Provider request
+description: Ask for a new AI service to be tracked (e.g. Gemini, Perplexity, OpenRouter)
+title: "Add <service> usage tracking"
+labels: ["provider-request", "enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Want AIQuotaBar to track another AI service? Tell us what limit you keep running into.
+        First, check the [roadmap](https://github.com/yagcioglutoprak/AIQuotaBar/issues/28) and existing
+        [provider requests](https://github.com/yagcioglutoprak/AIQuotaBar/issues?q=label%3Aprovider-request).
+        If it's already there, 👍 it instead of opening a new one.
+
+  - type: input
+    id: service
+    attributes:
+      label: Service
+      placeholder: "e.g. Google Gemini"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: limit-type
+    attributes:
+      label: What kind of limit is it?
+      options:
+        - Subscription plan limits (messages / requests per hour, day, week or month)
+        - Prepaid API credits or balance
+        - API spend against a budget
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: where
+    attributes:
+      label: Where can you see your usage today?
+      description: "Link the usage or billing page (e.g. https://example.com/settings/usage), or say if there's none."
+    validations:
+      required: true
+
+  - type: textarea
+    id: api
+    attributes:
+      label: Known API or endpoint (optional)
+      description: |
+        Official docs for a usage/balance endpoint, or what the web app calls (DevTools → Network on the usage page).
+        **Don't paste cookies, tokens or keys.**
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you like to build it?
+      description: API-key providers take about 3 steps. See CONTRIBUTING.md → "Add a provider".
+      options:
+        - Yes, I'd like to open a PR
+        - Maybe, with some guidance
+        - No, just requesting it
+    validations:
+      required: true

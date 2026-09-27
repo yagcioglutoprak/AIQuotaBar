@@ -1,0 +1,90 @@
+name: Bug report
+description: Something isn't working (a service isn't detected, wrong numbers, the panel or widget misbehaves)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this! A few details help a lot.
+        **Never paste cookies, session tokens or API keys**, and check your log excerpt before posting.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you see instead? Screenshots are welcome (hide account details).
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: services
+    attributes:
+      label: Which services are affected?
+      options:
+        - label: Claude
+        - label: ChatGPT / Codex
+        - label: Cursor
+        - label: GitHub Copilot
+        - label: Claude Code
+        - label: An API-key provider (OpenAI, MiniMax, GLM, …)
+        - label: The app itself (menu bar, panel, settings, widget, install)
+
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser you're signed in with
+      options:
+        - Chrome
+        - Arc
+        - Brave
+        - Edge
+        - Firefox / LibreWolf
+        - Safari
+        - Other / not relevant
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install AIQuotaBar?
+      options:
+        - One-line installer (curl … | bash)
+        - Homebrew tap
+        - From source (git clone)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: AIQuotaBar version
+      description: "Run `python3 ~/.ai-quota-bar/claude_bar.py --version` (or `python3 claude_bar.py --version` in your clone)."
+      placeholder: "AIQuotaBar 2.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "macOS 26.5 (Apple silicon)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: "Output of `tail -50 ~/.claude_bar.log`. Remove anything that looks like a cookie, token or key before posting."
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues (open and closed) for this problem.
+          required: true
+        - label: I removed cookies, tokens and keys from everything above.
+          required: true

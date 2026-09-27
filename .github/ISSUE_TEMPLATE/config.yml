@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: "Roadmap: vote on what's next"
+    url: https://github.com/yagcioglutoprak/AIQuotaBar/issues/28
+    about: 👍 the features and services you want most.
+  - name: Report a security vulnerability
+    url: https://github.com/yagcioglutoprak/AIQuotaBar/blob/main/SECURITY.md
+    about: Please don't open a public issue for security problems. See SECURITY.md.
