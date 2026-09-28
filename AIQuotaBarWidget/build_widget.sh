@@ -15,7 +15,9 @@ echo "  ────────────────────────
 echo ""
 
 # ── Check Xcode ──────────────────────────────────────────────────────────────
-if ! command -v xcodebuild &>/dev/null; then
+# `command -v xcodebuild` is also true with only the Command Line Tools, where
+# /usr/bin/xcodebuild is a shim that fails with "requires Xcode".
+if ! xcodebuild -version >/dev/null 2>&1; then
     echo "  ✗  Xcode not found. Install from the App Store."
     echo "     The widget is optional — the menu bar app works without it."
     exit 1
@@ -81,12 +83,17 @@ fi
 
 echo "  ↓  Signing…"
 BUILT_EXT="$BUILT_APP/Contents/PlugIns/AIQuotaBarWidgetExtension.appex"
-codesign --force --sign - --timestamp=none \
-    --entitlements "$PROJECT_DIR/AIQuotaBarWidgetExtension/AIQuotaBarWidgetExtension.entitlements" \
-    "$BUILT_EXT" >/dev/null 2>&1
-codesign --force --sign - --timestamp=none \
-    --entitlements "$PROJECT_DIR/AIQuotaBarHost/AIQuotaBarHost.entitlements" \
-    "$BUILT_APP" >/dev/null 2>&1
+# Wrapped so a failure reports itself instead of exiting silently under set -e.
+sign() {
+    local out
+    if ! out=$(codesign --force --sign - --timestamp=none --entitlements "$1" "$2" 2>&1); then
+        echo "  ✗  Signing failed for $(basename "$2"):"
+        echo "$out" | sed 's/^/     /'
+        exit 1
+    fi
+}
+sign "$PROJECT_DIR/AIQuotaBarWidgetExtension/AIQuotaBarWidgetExtension.entitlements" "$BUILT_EXT"
+sign "$PROJECT_DIR/AIQuotaBarHost/AIQuotaBarHost.entitlements" "$BUILT_APP"
 if ! codesign --verify --deep --strict "$BUILT_APP" 2>/dev/null; then
     echo "  ✗  Signing failed — macOS will not register an unsigned widget."
     exit 1

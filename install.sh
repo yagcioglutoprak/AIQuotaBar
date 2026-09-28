@@ -101,7 +101,9 @@ echo "  ✓  Added to Login Items (runs at every login)"
 WIDGET_APP="/Applications/AIQuotaBarHost.app"
 WIDGET_INSTALLED=false
 
-if command -v xcodebuild &>/dev/null && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AIQuotaBarWidget.xcodeproj" ]; then
+# `xcodebuild -version` rather than `command -v xcodebuild`: the latter is true
+# with only the Command Line Tools, whose xcodebuild shim cannot build.
+if xcodebuild -version >/dev/null 2>&1 && [ -d "$INSTALL_DIR/AIQuotaBarWidget/AIQuotaBarWidget.xcodeproj" ]; then
     # Always rebuild when Xcode is available, including over an existing
     # install. Skipping when /Applications already has the app means an
     # update never reaches the widget, leaving it rendering stale code
