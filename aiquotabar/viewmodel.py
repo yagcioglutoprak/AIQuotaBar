@@ -484,18 +484,23 @@ def build_panel_state(snap: Snapshot) -> dict:
 
 
 def share_summary(cards: list[dict]) -> dict:
-    """Numbers for the share card + the text for 'Post on X'."""
+    """Numbers for the share card + the text for 'Post on X'.
+
+    Each provider shares the same number the menu bar shows: Claude its
+    session limit, the others their worst row (see bar_segments).
+    """
     items = []
     for card in cards:
         meters = card.get("meters") or []
         if not meters:
             continue
-        m = meters[0]
+        m = meters[0] if card["id"] == "claude" else max(meters, key=lambda x: x["pct"])
+        rest = [x for x in meters if x is not m]
         items.append({"id": card["id"], "name": card["name"], "color": card["color"],
                       "icon": card["icon"], "mask": card["mask"],
                       "label": m["label"], "pct": m["pct"], "severity": m["severity"],
                       "reset_text": m["reset_text"],
-                      "extra": [{"label": x["label"], "pct": x["pct"]} for x in meters[1:3]]})
+                      "extra": [{"label": x["label"], "pct": x["pct"]} for x in rest[:2]]})
     parts = [f"{i['name']} {i['pct']}%" for i in items]
     stats = " · ".join(parts) if parts else "my AI usage"
     return {

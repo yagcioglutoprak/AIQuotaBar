@@ -348,9 +348,13 @@ def _parse_wham_usage(data: dict) -> ProviderData:
     for extra in (data.get("additional_rate_limits") or []):
         if isinstance(extra, dict):
             name = extra.get("name") or extra.get("type") or "Extra"
-            row = _parse_wham_window(extra, name.replace("_", " ").title())
+            label = name.replace("_", " ").title()
+            row = _parse_wham_window(extra, label)
             if row:
                 rows.append(row)
+                secondary = _parse_wham_secondary(extra, label)
+                if secondary is not None:
+                    rows.append(secondary)
 
     if not rows:
         return ProviderData("ChatGPT", error="No rate limit data in response")

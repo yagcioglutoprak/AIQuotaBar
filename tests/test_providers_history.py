@@ -61,6 +61,23 @@ def test_wham_primary_and_secondary_windows():
     assert pd.spent == 64.0
 
 
+def test_wham_additional_rate_limits_include_secondary_window():
+    pd = _parse_wham_usage({
+        "rate_limit": {"primary_window": {"used_percent": 5}},
+        "additional_rate_limits": [{
+            "name": "gpt_5_codex",
+            "primary_window": {"used_percent": 20, "limit_window_seconds": 18000},
+            "secondary_window": {"used_percent": 71, "reset_after_seconds": 3 * D,
+                                 "limit_window_seconds": 604800},
+        }],
+    })
+    labels = [(r.label, r.pct, r.window_secs) for r in pd._rows]
+    assert labels == [("Codex Tasks", 5, None), ("Gpt 5 Codex", 20, 18000),
+                      ("Gpt 5 Codex Weekly", 71, 604800)]
+    assert pd._rows[2].resets_at is not None
+    assert pd.spent == 71.0
+
+
 def test_wham_without_secondary_is_unchanged():
     pd = _parse_wham_usage({"rate_limit": {"primary_window": {"used_percent": 5}}})
     assert [r.label for r in pd._rows] == ["Codex Tasks"]
