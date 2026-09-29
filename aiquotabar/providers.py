@@ -111,6 +111,17 @@ def _org_id_from_cookies(cookies: dict) -> str | None:
     return cookies.get("lastActiveOrg") or cookies.get("routingHint")
 
 
+def _org_uuid(org) -> str | None:
+    """An organization's uuid, falling back to its id.
+
+    /organizations/{id}/usage rejects the legacy numeric id with HTTP 400
+    ("organization_uuid: invalid length"), so the uuid has to win.
+    """
+    if not isinstance(org, dict):
+        return None
+    return org.get("uuid") or org.get("id")
+
+
 def _org_id_from_api(cookies: dict) -> str | None:
     for path in (
         "/api/organizations",
@@ -121,14 +132,14 @@ def _org_id_from_api(cookies: dict) -> str | None:
         try:
             data = _get(f"https://claude.ai{path}", cookies)
             if isinstance(data, list) and data:
-                return data[0].get("id") or data[0].get("uuid")
+                return _org_uuid(data[0])
             if isinstance(data, dict):
                 for candidate in (
                     data.get("organization_id"),
                     data.get("org_id"),
-                    (data.get("organizations") or [{}])[0].get("id"),
-                    (data.get("account", {}).get("memberships") or [{}])[0]
-                        .get("organization", {}).get("id"),
+                    _org_uuid((data.get("organizations") or [{}])[0]),
+                    _org_uuid((data.get("account", {}).get("memberships") or [{}])[0]
+                              .get("organization")),
                 ):
                     if candidate:
                         return candidate
@@ -265,8 +276,11 @@ def parse_usage(raw: dict) -> UsageData:
 
 # ── third-party provider APIs ────────────────────────────────────────────────
 
-def _api_get(url: str, headers: dict, cookies: dict | None = None) -> dict:
-    clean = _strip_cf_cookies(cookies) if cookies else None
+def _api_get(url: str, headers: dict, cookies: dict | None = None,
+             keep_cf: bool = False) -> dict:
+    clean = None
+    if cookies:
+        clean = cookies if keep_cf else _strip_cf_cookies(cookies)
     r = requests.get(url, headers=headers, cookies=clean, timeout=10, impersonate=_IMPERSONATE)
     r.raise_for_status()
     return r.json()
@@ -278,9 +292,26 @@ _CHATGPT_HEADERS = {
 }
 
 
+def _chatgpt_get(url: str, headers: dict, cookies: dict) -> dict:
+    """GET on chatgpt.com, without the Cloudflare cookies first.
+
+    Those cookies are bound to the browser's TLS fingerprint, and sending
+    them works for some people and breaks it for others. Some chatgpt.com
+    edges answer 403 without cf_clearance, so on a 403 retry once with them.
+    """
+    try:
+        return _api_get(url, headers, cookies)
+    except CurlHTTPError as e:
+        code = getattr(getattr(e, "response", None), "status_code", 0)
+        if code != 403 or not CF_COOKIE_KEYS & set(cookies):
+            raise
+        log.debug("chatgpt 403 on %s; retrying with Cloudflare cookies", url)
+        return _api_get(url, headers, cookies, keep_cf=True)
+
+
 def _chatgpt_access_token(cookies: dict) -> str | None:
     """Exchange session cookie for a short-lived Bearer token."""
-    data = _api_get("https://chatgpt.com/api/auth/session", _CHATGPT_HEADERS, cookies)
+    data = _chatgpt_get("https://chatgpt.com/api/auth/session", _CHATGPT_HEADERS, cookies)
     return data.get("accessToken")
 
 
@@ -373,7 +404,7 @@ def fetch_chatgpt(cookie_str: str) -> ProviderData:
         if not token:
             return ProviderData("ChatGPT", error="Not logged in")
         h = {**_CHATGPT_HEADERS, "Authorization": f"Bearer {token}"}
-        data = _api_get("https://chatgpt.com/backend-api/wham/usage", h, cookies)
+        data = _chatgpt_get("https://chatgpt.com/backend-api/wham/usage", h, cookies)
         return _parse_wham_usage(data)
     except Exception as e:
         log.debug("fetch_chatgpt failed: %s", e)
