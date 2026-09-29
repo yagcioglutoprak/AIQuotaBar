@@ -249,6 +249,18 @@ def test_disable_and_enable_provider(ui):
     send(app._panel.host, action="disable", provider="nonsense")
 
 
+def test_turning_the_widget_off_quits_its_host(ui, monkeypatch):
+    events = []
+    monkeypatch.setattr(ui, "_quit_widget_host", lambda: events.append("quit"))
+    monkeypatch.setattr(ui, "_write_widget_cache", lambda *a, **k: events.append("write"))
+    app = start(ui.ClaudeBar())
+    events.clear()
+    send(app._panel.host, action="set", key="widget_enabled", value=False)
+    assert app.config["widget_enabled"] is False and events == ["quit"]
+    send(app._panel.host, action="set", key="widget_enabled", value=True)
+    assert events == ["quit", "write"]                # fresh data right away
+
+
 def test_launch_at_login_toggle_writes_and_removes_plist(ui):
     app = start(ui.ClaudeBar())
     send(app._panel.host, action="set_login", value=False)

@@ -134,3 +134,18 @@ def test_api_provider_extra_row(browser):
     page, errors = open_view(browser, "panel", build_panel_state(snap))
     assert "OpenAI API" in page.locator(".extras").inner_text()
     assert errors == []
+
+
+def test_widget_toggle_only_when_installed(browser):
+    snap = demo_snapshot()
+    for installed in (False, True):
+        state = build_settings_state(snap.config, snap=snap, widget_installed=installed)
+        page, errors = open_view(browser, "settings", state)
+        page.get_by_role("button", name="About").click()
+        switch = page.get_by_role("switch", name="Keep the widget updated")
+        assert switch.count() == int(installed) and errors == []
+        if installed:
+            assert switch.get_attribute("aria-checked") == "true"
+            switch.click()
+            assert {"action": "set", "key": "widget_enabled", "value": False} in outbox(page)
+        page.close()
