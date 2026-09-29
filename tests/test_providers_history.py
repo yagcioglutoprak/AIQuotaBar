@@ -1,10 +1,13 @@
+import json
 import sqlite3
 import time
 from datetime import datetime, timezone
 
-from aiquotabar import history
+import pytest
+
+from aiquotabar import history, providers
 from aiquotabar.providers import (
-    _next_month_reset, _parse_ts, _parse_wham_usage, fmt_reset_ts, parse_usage,
+    CurlHTTPError, _next_month_reset, _parse_ts, _parse_wham_usage, fmt_reset_ts, parse_usage,
 )
 
 H, D = 3600, 86400
@@ -81,6 +84,152 @@ def test_wham_additional_rate_limits_include_secondary_window():
 def test_wham_without_secondary_is_unchanged():
     pd = _parse_wham_usage({"rate_limit": {"primary_window": {"used_percent": 5}}})
     assert [r.label for r in pd._rows] == ["Codex Tasks"]
+
+
+# ── Claude org id ────────────────────────────────────────────────────────────
+
+def test_org_id_prefers_uuid(monkeypatch):
+    uuid = "0f6c1d2e-3b4a-5c6d-7e8f-9a0b1c2d3e4f"
+    monkeypatch.setattr(providers, "_get", lambda url, cookies: [{"id": 123456789, "uuid": uuid}])
+    assert providers._org_id_from_api({}) == uuid
+
+
+def test_org_id_prefers_uuid_in_nested_shapes(monkeypatch):
+    uuid = "0f6c1d2e-3b4a-5c6d-7e8f-9a0b1c2d3e4f"
+    answers = {
+        "/api/organizations": RuntimeError("404"),
+        "/api/bootstrap": {"account": {"memberships": [
+            {"organization": {"id": 123456789, "uuid": uuid}}]}},
+    }
+
+    def fake_get(url, cookies):
+        ans = answers.get(url.removeprefix("https://claude.ai"), {})
+        if isinstance(ans, Exception):
+            raise ans
+        return ans
+
+    monkeypatch.setattr(providers, "_get", fake_get)
+    assert providers._org_id_from_api({}) == uuid
+
+
+def test_org_id_falls_back_to_id_without_uuid(monkeypatch):
+    monkeypatch.setattr(providers, "_get", lambda url, cookies: [{"id": "legacy-id"}])
+    assert providers._org_id_from_api({}) == "legacy-id"
+
+
+# ── ChatGPT Cloudflare cookies ───────────────────────────────────────────────
+
+class _Resp:
+    def __init__(self, status, body=None):
+        self.status_code, self._body = status, body or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise CurlHTTPError(f"HTTP {self.status_code}", response=self)
+
+    def json(self):
+        return self._body
+
+
+_CHATGPT_COOKIES = "__Secure-next-auth.session-token=abc; cf_clearance=cf; __cf_bm=bm"
+_WHAM = {"rate_limit": {"primary_window": {"used_percent": 30}}}
+
+
+def _fake_chatgpt(monkeypatch, status_without_cf):
+    calls = []
+
+    def fake_get(url, headers=None, cookies=None, **kw):
+        has_cf = "cf_clearance" in (cookies or {})
+        calls.append((url.rsplit("/", 1)[-1], has_cf))
+        if not has_cf and status_without_cf != 200:
+            return _Resp(status_without_cf)
+        return _Resp(200, {"accessToken": "tok"} if url.endswith("/session") else _WHAM)
+
+    monkeypatch.setattr(providers.requests, "get", fake_get)
+    return calls
+
+
+def test_chatgpt_strips_cloudflare_cookies_by_default(monkeypatch):
+    calls = _fake_chatgpt(monkeypatch, 200)
+    pd = providers.fetch_chatgpt(_CHATGPT_COOKIES)
+    assert pd.error is None and pd.spent == 30.0
+    assert calls == [("session", False), ("usage", False)]
+
+
+def test_chatgpt_retries_with_cloudflare_cookies_on_403(monkeypatch):
+    calls = _fake_chatgpt(monkeypatch, 403)
+    pd = providers.fetch_chatgpt(_CHATGPT_COOKIES)
+    assert pd.error is None and pd.spent == 30.0
+    assert calls == [("session", False), ("session", True), ("usage", False), ("usage", True)]
+
+
+def test_chatgpt_does_not_retry_other_errors(monkeypatch):
+    calls = _fake_chatgpt(monkeypatch, 401)
+    pd = providers.fetch_chatgpt(_CHATGPT_COOKIES)
+    assert pd.error and calls == [("session", False)]
+
+
+def test_chatgpt_403_without_cloudflare_cookies_is_not_retried(monkeypatch):
+    calls = _fake_chatgpt(monkeypatch, 403)
+    pd = providers.fetch_chatgpt("__Secure-next-auth.session-token=abc")
+    assert pd.error and calls == [("session", False)]
+
+
+# ── browser cookie detection (the real child-process script) ─────────────────
+
+_FAKE_BROWSER_COOKIE3 = """
+import json, os
+
+class _C:
+    def __init__(self, name, value, expires):
+        self.name, self.value, self.expires = name, value, expires
+
+_JARS = json.loads(os.environ["FAKE_JARS"])
+
+def _jar(browser):
+    def fn(domain_name=None):
+        if browser not in _JARS:
+            raise RuntimeError("no profile")
+        return [_C(*c) for c in _JARS[browser]]
+    return fn
+
+firefox = _jar("firefox")
+chrome = _jar("chrome")
+"""
+
+
+@pytest.fixture
+def fake_browsers(tmp_path, monkeypatch):
+    (tmp_path / "browser_cookie3.py").write_text(_FAKE_BROWSER_COOKIE3)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+
+    def use(jars):
+        monkeypatch.setenv("FAKE_JARS", json.dumps(jars))
+    return use
+
+
+TOKEN = "__Secure-next-auth.session-token"
+
+
+def test_detects_chunked_nextauth_session(fake_browsers):
+    fake_browsers({"chrome": [[f"{TOKEN}.0", "aaa", 2e9], [f"{TOKEN}.1", "bbb", 2e9],
+                              ["oai-did", "x", 2e9]]})
+    found = providers._run_cookie_detection("chatgpt.com", TOKEN)
+    assert found == [f"{TOKEN}.0=aaa; {TOKEN}.1=bbb; oai-did=x"]
+
+
+def test_detects_unchunked_session_and_ranks_by_expiry(fake_browsers):
+    fake_browsers({"firefox": [[TOKEN, "old", 1.9e12]],          # ms, normalised
+                   "chrome": [[f"{TOKEN}.0", "new", 2.0e9]]})
+    found = providers._run_cookie_detection("chatgpt.com", TOKEN)
+    assert found == [f"{TOKEN}.0=new", f"{TOKEN}=old"]
+
+
+def test_detection_ignores_look_alike_cookie_names(fake_browsers):
+    fake_browsers({"chrome": [[f"{TOKEN}-legacy", "x", 2e9], [f"{TOKEN}.1", "y", 2e9]],
+                   "firefox": [["sessionKeyLC", "z", 2e9]]})
+    assert providers._run_cookie_detection("chatgpt.com", TOKEN) == []
+    assert providers._run_cookie_detection("claude.ai", "sessionKey") == []
 
 
 def test_next_month_reset():
