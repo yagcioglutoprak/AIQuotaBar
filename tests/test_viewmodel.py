@@ -177,8 +177,19 @@ def test_stale_footer():
 
 def test_share_summary_text():
     st = build_panel_state(demo_snapshot(now=NOW))
-    assert st["share"]["text"].startswith("Claude 78% · ChatGPT 22% · Cursor 48% · Copilot 62%")
+    assert st["share"]["text"].startswith("Claude 78% · ChatGPT 64% · Cursor 48% · Copilot 62%")
     assert st["share"]["url"].endswith("/AIQuotaBar")
+
+
+def test_share_matches_menu_bar_numbers():
+    s = demo_snapshot(now=NOW)
+    shared = {i["name"]: i for i in build_panel_state(s)["share"]["items"]}
+    for seg in bar_segments(s):
+        assert shared[seg["name"]]["pct"] == seg["pct"]
+    # the shared row keeps its own label, and the rest move to "extra"
+    chatgpt = shared["ChatGPT"]
+    assert "weekly" in chatgpt["label"].lower()
+    assert chatgpt["pct"] not in [x["pct"] for x in chatgpt["extra"]]
 
 
 # ── status bar ───────────────────────────────────────────────────────────────
