@@ -91,8 +91,13 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
 ## Key decisions to preserve
 
 - **Session (5-hour) drives the Claude status bar number**, not the max of all limits.
-  Weekly limits appear in the panel (a trailing `·` marks a maxed weekly limit). The panel's hero
-  card, by contrast, shows the *binding* constraint across all providers.
+  Weekly limits appear in the panel (a trailing `·` marks a maxed weekly limit). Users can opt into
+  more Claude segments (`claude_bar_metrics`: session / weekly / weekly_sonnet, tagged 5h / 7d /
+  7d·S only when more than one shows). The share card uses the same number as the bar. The
+  panel's hero card, by contrast, shows the *binding* constraint across all providers.
+- **The widget can be turned off** (`widget_enabled`). When it's off, or the host app isn't
+  installed, the app never runs `open -a AIQuotaBarHost` (that launch is what brings back the
+  host's window).
 - **Firefox/LibreWolf first** in browser detection order — no Keychain prompt, zero friction.
   Chromium browsers (Arc, Chrome, Brave) come after; they need one-time "Always Allow".
 - **API utilization scale is now consistent**: all fields (`five_hour`, `seven_day`,
