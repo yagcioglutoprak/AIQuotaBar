@@ -309,6 +309,44 @@ def test_single_instance_lock(tmp_path):
         os.close(fd)
 
 
+def test_app_registers_as_aiquotabar_not_python(monkeypatch):
+    import sys
+    from aiquotabar import __main__ as entry
+
+    class Bundle:
+        def __init__(self, info, localized=None):
+            self.info, self.localized = info, localized
+
+        def infoDictionary(self):
+            return self.info
+
+        def localizedInfoDictionary(self):
+            return self.localized
+
+    def run(bundle):
+        monkeypatch.setattr(sys.modules["Foundation"], "NSBundle",
+                            type("NSBundle", (), {"mainBundle": staticmethod(lambda: bundle)}))
+        entry._set_app_name()
+        return bundle
+
+    b = run(Bundle({"CFBundleName": "Python"}, {"CFBundleName": "Python"}))
+    assert b.info["CFBundleName"] == b.localized["CFBundleName"] == "AIQuotaBar"
+    assert run(Bundle({"CFBundleName": "SomeApp"})).info["CFBundleName"] == "SomeApp"
+
+    class ReadOnly(dict):
+        def __setitem__(self, k, v):
+            raise TypeError("immutable")
+    b = run(Bundle({"CFBundleName": "Python"}, ReadOnly(CFBundleName="Python")))
+    assert b.info["CFBundleName"] == "AIQuotaBar"          # one failure doesn't stop the other
+    run(Bundle(None))                                   # no bundle info: nothing to do
+
+    def boom():
+        raise RuntimeError("no Foundation")
+    monkeypatch.setattr(sys.modules["Foundation"], "NSBundle",
+                        type("NSBundle", (), {"mainBundle": staticmethod(boom)}))
+    entry._set_app_name()                               # never raises
+
+
 def test_ui_failures_never_escape_timer_callbacks(ui, monkeypatch):
     app = ui.ClaudeBar(demo=True)
 
