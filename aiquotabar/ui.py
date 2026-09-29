@@ -461,24 +461,34 @@ class ClaudeBar(rumps.App):
 
             font = NSFont.menuBarFontOfSize_(0)
             base = {NSFontAttributeName: font} if font else {}
+            # Limit tags ("5h", "7d") are secondary: smaller, but no explicit
+            # colour, so they keep the menu bar's adaptive light/dark vibrancy.
+            small = NSFont.menuBarFontOfSize_(max(10.0, font.pointSize() * 0.85)) if font else None
+            tag_attrs = {NSFontAttributeName: small} if small else base
             sev_color = {"warn": NSColor.systemOrangeColor(), "crit": NSColor.systemRedColor()}
 
-            def text(s: str, color=None):
-                attrs = dict(base)
+            def text(s: str, color=None, attrs=None):
+                attrs = dict(base if attrs is None else attrs)
                 if color is not None:
                     attrs[NSForegroundColorAttributeName] = color
                 return NSAttributedString.alloc().initWithString_attributes_(s, attrs)
 
             out = NSMutableAttributedString.alloc().initWithString_("")
+            prev = None
             for i, seg in enumerate(segments):
                 p = theme.PROVIDERS[seg["id"]]
+                same = seg["id"] == prev     # e.g. Claude session + weekly
+                prev = seg["id"]
                 if i:
-                    out.appendAttributedString_(text("   "))
-                img = _bar_icon(p["icon"], p["tint"])
-                if img:
-                    out.appendAttributedString_(_icon_astr(img, base))
-                else:
-                    out.appendAttributedString_(text("●"))
+                    out.appendAttributedString_(text("  " if same else "   "))
+                if not same:
+                    img = _bar_icon(p["icon"], p["tint"])
+                    if img:
+                        out.appendAttributedString_(_icon_astr(img, base))
+                    else:
+                        out.appendAttributedString_(text("●"))
+                if seg.get("tag"):
+                    out.appendAttributedString_(text(("" if same else " ") + seg["tag"], attrs=tag_attrs))
                 out.appendAttributedString_(text(f" {seg['pct']}%", sev_color.get(seg["severity"])))
                 if seg.get("weekly_maxed"):
                     out.appendAttributedString_(text(" ·"))
@@ -493,7 +503,8 @@ class ClaudeBar(rumps.App):
             self._nsapp.nsstatusitem.setAttributedTitle_(out)
         except Exception:
             log.debug("attributed title failed", exc_info=True)
-            parts = [f"{s['name']} {s['pct']}%" for s in segments]
+            parts = [" ".join(x for x in (s["name"], s.get("tag"), f"{s['pct']}%") if x)
+                     for s in segments]
             if cc_msgs:
                 parts.append(f"◆ {fmt_count(cc_msgs)}")
             self.title = "  ".join(parts)

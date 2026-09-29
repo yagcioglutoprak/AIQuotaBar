@@ -372,6 +372,7 @@ svg.i.xs { width: 11px; height: 11px; }
 .mb-preview .picon { width: 14px; height: 14px; }
 .mb-preview .picon.mask { background-color: #fff !important; }
 .mb-preview .dim { opacity: 0.55; }
+.mb-preview small { font-size: 0.85em; }
 .mb-preview .w { color: #FFB84D; }
 .mb-preview .c { color: #FF7A72; }
 .notif-grid { display: grid; grid-template-columns: 1fr repeat(3, 92px); align-items: center; }

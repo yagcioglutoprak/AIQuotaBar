@@ -213,6 +213,51 @@ def test_weekly_maxed_marker():
     assert seg["weekly_maxed"] is True
 
 
+def test_claude_bar_metrics_default_is_the_bare_session():
+    seg = bar_segments(demo_snapshot(now=NOW))[0]
+    assert (seg["name"], seg["pct"], seg["tag"]) == ("Claude", 78, None)
+
+
+def test_claude_bar_metrics_one_segment_per_limit_with_tags():
+    s = demo_snapshot(now=NOW)
+    s.config["claude_bar_metrics"] = ["weekly_sonnet", "session", "weekly"]
+    segs = bar_segments(s)
+    assert [(x["name"], x["tag"], x["pct"]) for x in segs] == [
+        ("Claude", "5h", 78), ("Claude", "7d", 41), ("Claude", "7d·S", 23), ("ChatGPT", None, 64)]
+    # a single non-session limit is shown bare, too
+    s.config["claude_bar_metrics"] = ["weekly"]
+    assert [(x["tag"], x["pct"]) for x in bar_segments(s)][:1] == [(None, 41)]
+
+
+def test_claude_bar_metrics_fall_back_when_the_limit_is_missing():
+    data = UsageData(session=row("Current Session", 12))
+    s = snap(claude=data)
+    s.config["claude_bar_metrics"] = ["weekly_sonnet"]
+    assert [x["pct"] for x in bar_segments(s)] == [12]
+
+
+def test_weekly_maxed_marker_only_on_a_lone_session():
+    data = UsageData(session=row("Current Session", 10), weekly_all=row("All Models", 97))
+    s = snap(claude=data)
+    s.config["claude_bar_metrics"] = ["session", "weekly"]
+    assert [x["weekly_maxed"] for x in bar_segments(s)] == [False, False]
+
+
+def test_auto_names_are_services_not_segments():
+    s = demo_snapshot(now=NOW)
+    s.config["claude_bar_metrics"] = ["session", "weekly"]
+    st = build_settings_state(s.config, snap=s)
+    assert [p["name"] for p in st["menubar"]["providers"] if p["on"]] == ["Claude", "ChatGPT"]
+    assert [m["id"] for m in st["menubar"]["claude_metrics"] if m["on"]] == ["session", "weekly"]
+
+
+def test_share_uses_the_first_claude_limit_in_the_bar():
+    s = demo_snapshot(now=NOW)
+    s.config["claude_bar_metrics"] = ["weekly"]
+    claude = build_panel_state(s)["share"]["items"][0]
+    assert (claude["pct"], claude["label"]) == (41, "Weekly · all models")
+
+
 def test_menu_lines_fallback():
     lines = menu_lines(build_panel_state(demo_snapshot(now=NOW)))
     text = "\n".join(line for line in lines if line)
@@ -260,6 +305,16 @@ def test_widget_enabled_setting():
     assert not apply_setting(cfg, "widget_enabled", "off")
     assert apply_setting(cfg, "widget_enabled", False) and cfg["widget_enabled"] is False
     assert build_settings_state(cfg)["widget"]["enabled"] is False
+
+
+def test_apply_setting_claude_bar_metrics():
+    cfg = {}
+    assert apply_setting(cfg, "claude_bar_metrics", ["weekly", "session", "weekly"])
+    assert cfg["claude_bar_metrics"] == ["session", "weekly"]
+    assert not apply_setting(cfg, "claude_bar_metrics", [])          # something must show
+    assert not apply_setting(cfg, "claude_bar_metrics", ["weekly_opus"])
+    assert not apply_setting(cfg, "claude_bar_metrics", "session")
+    assert cfg["claude_bar_metrics"] == ["session", "weekly"]
 
 
 def test_settings_state_masks_api_keys():

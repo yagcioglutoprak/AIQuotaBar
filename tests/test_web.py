@@ -149,3 +149,13 @@ def test_widget_toggle_only_when_installed(browser):
             switch.click()
             assert {"action": "set", "key": "widget_enabled", "value": False} in outbox(page)
         page.close()
+
+
+def test_claude_limits_picker(browser):
+    snap = demo_snapshot()
+    page, errors = open_view(browser, "settings", build_settings_state(snap.config, snap=snap))
+    page.get_by_role("button", name="Menu bar").click()
+    assert page.get_by_role("button", name="Session", exact=True).is_disabled()   # last one stays
+    page.get_by_role("button", name="Weekly", exact=True).click()
+    assert {"action": "set", "key": "claude_bar_metrics", "value": ["session", "weekly"]} in outbox(page)
+    assert errors == []

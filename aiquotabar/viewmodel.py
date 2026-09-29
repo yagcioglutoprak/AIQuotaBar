@@ -122,6 +122,25 @@ _CLAUDE_LABELS = {
     "Opus Only":       ("Weekly · Opus", "7-day window"),
 }
 
+# Claude limits the menu bar can show: metric -> (UsageData field, bar tag, label).
+# The tag only appears when more than one limit is shown.
+CLAUDE_BAR_METRICS = {
+    "session":       ("session", "5h", "Session"),
+    "weekly":        ("weekly_all", "7d", "Weekly"),
+    "weekly_sonnet": ("weekly_sonnet", "7d·S", "Weekly Sonnet"),
+}
+DEFAULT_CLAUDE_BAR_METRICS = ["session"]
+
+
+def claude_bar_metrics(cfg: dict) -> list[str]:
+    """The chosen Claude bar limits in canonical order (session by default)."""
+    chosen = cfg.get("claude_bar_metrics")
+    if isinstance(chosen, list):
+        out = [m for m in CLAUDE_BAR_METRICS if m in chosen]
+        if out:
+            return out
+    return list(DEFAULT_CLAUDE_BAR_METRICS)
+
 
 def _humanize(label: str) -> str:
     """'Codex Tasks Weekly' -> 'Codex tasks · weekly'."""
@@ -256,14 +275,16 @@ def _claude_card(snap: Snapshot) -> dict | None:
     data = snap.claude
     rows = []
     if data:
-        rows = [(r, k) for r, k in (
-            (data.session, "claude"), (data.weekly_all, None),
-            (data.weekly_sonnet, None), (data.weekly_opus, None)) if r]
+        rows = [(r, k, m) for r, k, m in (
+            (data.session, "claude", "session"), (data.weekly_all, None, "weekly"),
+            (data.weekly_sonnet, None, "weekly_sonnet"), (data.weekly_opus, None, None)) if r]
     if rows:
         meters = []
-        for row, key in rows:
+        for row, key, metric in rows:
             label, sub = _CLAUDE_LABELS.get(row.label, (row.label, ""))
-            meters.append(_row_meter(key, row, label, sub, snap))
+            meter = _row_meter(key, row, label, sub, snap)
+            meter["metric"] = metric
+            meters.append(meter)
         card.update(state="ok", meters=meters, status=_card_status(meters),
                     trend=_trend(snap, "claude"),
                     hits=snap.week_hits.get("claude", 0))
@@ -479,22 +500,34 @@ def build_panel_state(snap: Snapshot) -> dict:
                                   f"{interval // 60} min"),
         },
         "thresholds": {"warn": warn, "crit": crit},
-        "share": share_summary(cards),
+        "share": share_summary(cards, snap.config),
     }
 
 
-def share_summary(cards: list[dict]) -> dict:
+def _share_meter(card: dict, config: dict) -> dict:
+    meters = card["meters"]
+    if card["id"] != "claude":
+        return max(meters, key=lambda x: x["pct"])
+    for metric in claude_bar_metrics(config):
+        m = next((x for x in meters if x.get("metric") == metric), None)
+        if m:
+            return m
+    return meters[0]
+
+
+def share_summary(cards: list[dict], config: dict | None = None) -> dict:
     """Numbers for the share card + the text for 'Post on X'.
 
     Each provider shares the same number the menu bar shows: Claude its
-    session limit, the others their worst row (see bar_segments).
+    first chosen limit (the session by default), the others their worst row
+    (see bar_segments).
     """
     items = []
     for card in cards:
         meters = card.get("meters") or []
         if not meters:
             continue
-        m = meters[0] if card["id"] == "claude" else max(meters, key=lambda x: x["pct"])
+        m = _share_meter(card, config or {})
         rest = [x for x in meters if x is not m]
         items.append({"id": card["id"], "name": card["name"], "color": card["color"],
                       "icon": card["icon"], "mask": card["mask"],
@@ -512,26 +545,43 @@ def share_summary(cards: list[dict]) -> dict:
 
 # ── status bar ───────────────────────────────────────────────────────────────
 
+def _claude_bar_segments(data: UsageData, cfg: dict) -> list[dict]:
+    """One segment per chosen Claude limit that has data (session by default)."""
+    rows = [(m, getattr(data, CLAUDE_BAR_METRICS[m][0])) for m in claude_bar_metrics(cfg)]
+    rows = [(m, r) for m, r in rows if r]
+    if not rows:
+        primary = data.session or data.weekly_all or data.weekly_sonnet
+        rows = [(None, primary)] if primary else []
+    tagged = len(rows) > 1
+    weekly_maxed = any(r and r.pct >= thresholds(cfg)[1]
+                       for r in (data.weekly_all, data.weekly_sonnet, data.weekly_opus))
+    segs = []
+    for metric, row in rows:
+        sev = severity(row.pct, cfg)
+        segs.append({
+            "id": "claude", "name": "Claude", "pct": row.pct, "severity": sev,
+            "reset_ts": row.resets_at,
+            "tag": CLAUDE_BAR_METRICS[metric][1] if tagged else None,
+            # A lone session number gets a trailing "·" when a weekly limit is
+            # maxed; once a weekly limit has its own segment it speaks for itself.
+            "weekly_maxed": (weekly_maxed and not tagged and row is data.session
+                             and sev != "crit"),
+        })
+    return segs
+
+
 def bar_segments(snap: Snapshot) -> list[dict]:
     """Which providers the menu bar shows, with the percentage for each.
 
-    Claude uses its session (5-hour) limit — it decides whether you can keep
-    working right now. Other providers use their worst row.
+    Claude uses its session (5-hour) limit by default — it decides whether you
+    can keep working right now — or the limits chosen in claude_bar_metrics,
+    one segment each. Other providers use their worst row.
     """
-    available: dict[str, dict] = {}
-    data = snap.claude
-    if data:
-        primary = data.session or data.weekly_all or data.weekly_sonnet
-        if primary:
-            weekly_maxed = any(r and r.pct >= thresholds(snap.config)[1]
-                               for r in (data.weekly_all, data.weekly_sonnet, data.weekly_opus))
-            available["Claude"] = {
-                "id": "claude", "name": "Claude", "pct": primary.pct,
-                "severity": severity(primary.pct, snap.config),
-                "reset_ts": primary.resets_at,
-                "weekly_maxed": weekly_maxed and primary is data.session
-                                and severity(primary.pct, snap.config) != "crit",
-            }
+    available: dict[str, list[dict]] = {}
+    if snap.claude:
+        segs = _claude_bar_segments(snap.claude, snap.config)
+        if segs:
+            available["Claude"] = segs
     for pd in snap.providers:
         pid = theme.NAME_TO_ID.get(pd.name)
         if not pid or pd.error:
@@ -544,20 +594,23 @@ def bar_segments(snap: Snapshot) -> list[dict]:
             pct, reset_ts = pd.pct, pd.resets_at
         else:
             continue
-        available[pd.name] = {"id": pid, "name": pd.name, "pct": pct,
-                              "severity": severity(pct, snap.config),
-                              "reset_ts": reset_ts, "weekly_maxed": False}
+        available[pd.name] = [{"id": pid, "name": pd.name, "pct": pct,
+                               "severity": severity(pct, snap.config),
+                               "reset_ts": reset_ts, "tag": None, "weekly_maxed": False}]
     order = [theme.PROVIDERS[p]["name"] for p in theme.PROVIDER_ORDER]
     chosen = snap.config.get("bar_providers")
     if chosen:
-        return [available[n] for n in chosen if n in available]
-    return [available[n] for n in order if n in available][:2]
+        names = [n for n in chosen if n in available]
+    else:
+        names = [n for n in order if n in available][:2]
+    return [seg for n in names for seg in available[n]]
 
 
 def bar_auto_names(snap: Snapshot) -> list[str]:
     cfg = dict(snap.config)
     cfg.pop("bar_providers", None)
-    return [s["name"] for s in bar_segments(Snapshot(**{**snap.__dict__, "config": cfg}))]
+    segs = bar_segments(Snapshot(**{**snap.__dict__, "config": cfg}))
+    return list(dict.fromkeys(s["name"] for s in segs))
 
 
 # ── fallback text menu (used when WebKit is unavailable) ─────────────────────
@@ -673,6 +726,8 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
                            "icon": theme.PROVIDERS[theme.NAME_TO_ID[n]]["icon"],
                            "mask": theme.PROVIDERS[theme.NAME_TO_ID[n]]["tint"] is not None,
                            "on": (n in chosen) if chosen else (n in auto)} for n in names],
+            "claude_metrics": [{"id": m, "label": label, "on": m in claude_bar_metrics(cfg)}
+                               for m, (_f, _t, label) in CLAUDE_BAR_METRICS.items()],
             "show_reset": bool(cfg.get("bar_show_reset", False)),
             "show_cc": bool(cfg.get("bar_show_cc", True)),
         },
@@ -714,6 +769,12 @@ def apply_setting(cfg: dict, key: str, value) -> bool:
             cfg[key] = [n for n in order if n in value]
             return True
         return False
+    if key == "claude_bar_metrics":
+        if (isinstance(value, list) and value
+                and all(isinstance(v, str) and v in CLAUDE_BAR_METRICS for v in value)):
+            cfg[key] = [m for m in CLAUDE_BAR_METRICS if m in value]
+            return True
+        return False    # at least one limit has to stay visible
     if key in ("warn_threshold", "crit_threshold"):
         if not isinstance(value, int) or isinstance(value, bool):
             return False

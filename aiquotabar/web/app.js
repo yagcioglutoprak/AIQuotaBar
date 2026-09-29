@@ -587,10 +587,20 @@
     var preview = h("div", { class: "mb-preview", "aria-label": "Preview" },
       h("span", { class: "dim" }, "Wed 14:32"));
     var demo = { Claude: [78, "2h 14m"], ChatGPT: [64, "2d 6h"], Cursor: [48, "11d"], Copilot: [62, "8d"] };
+    var claudeDemo = { session: 78, weekly: 41, weekly_sonnet: 23 };
+    var metrics = mb.claude_metrics.filter(function (m) { return m.on; });
+    var tags = { session: "5h", weekly: "7d", weekly_sonnet: "7d·S" };
     mb.providers.filter(function (p) { return p.on; }).forEach(function (p, i) {
       var d = demo[p.name] || [0, ""];
-      preview.insertBefore(h("span", { class: "seg-i" }, providerIcon(p),
-        d[0] + "%" + (mb.show_reset && i === 0 ? " · " + d[1] : "")), preview.lastChild);
+      var reset = mb.show_reset && i === 0 ? " · " + d[1] : "";
+      if (p.name === "Claude" && metrics.length > 1) {
+        preview.insertBefore(h("span", { class: "seg-i" }, providerIcon(p), metrics.map(function (m, j) {
+          return [h("small", null, (j ? " " : "") + tags[m.id]), " " + claudeDemo[m.id] + "%" + (j === 0 ? reset : "")];
+        })), preview.lastChild);
+        return;
+      }
+      var pct = p.name === "Claude" && metrics.length ? claudeDemo[metrics[0].id] : d[0];
+      preview.insertBefore(h("span", { class: "seg-i" }, providerIcon(p), pct + "%" + reset), preview.lastChild);
     });
     if (mb.show_cc) preview.insertBefore(h("span", { class: "seg-i dim" }, "◆ 1.2k"), preview.lastChild);
     return [
@@ -609,6 +619,16 @@
               setting("bar_providers", next);
             } }, providerIcon(p), p.name);
         })))),
+      h("div", { class: "group-title" }, "Claude limits"),
+      h("div", { class: "group" },
+        row("Show in the menu bar", h("div", { class: "checks" }, mb.claude_metrics.map(function (m) {
+          var on = metrics.map(function (x) { return x.id; });
+          return h("button", { class: "check" + (m.on ? " on" : ""), "aria-pressed": m.on ? "true" : "false",
+            disabled: m.on && on.length === 1,
+            onclick: function () {
+              setting("claude_bar_metrics", m.on ? on.filter(function (x) { return x !== m.id; }) : on.concat([m.id]));
+            } }, m.label);
+        })), "With more than one, each gets a short tag: 5h, 7d.")),
       h("div", { class: "group-title" }, "Details"),
       h("div", { class: "group" },
         row("Time until reset", toggle(mb.show_reset, function (v) { setting("bar_show_reset", v); }, "Time until reset"),
