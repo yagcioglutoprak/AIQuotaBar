@@ -15,7 +15,9 @@ echo "  ────────────────────────
 echo ""
 
 # ── Check Xcode ──────────────────────────────────────────────────────────────
-if ! command -v xcodebuild &>/dev/null; then
+# `command -v xcodebuild` is also true with only the Command Line Tools, where
+# /usr/bin/xcodebuild is a shim that fails with "requires Xcode".
+if ! xcodebuild -version >/dev/null 2>&1; then
     echo "  ✗  Xcode not found. Install from the App Store."
     echo "     The widget is optional — the menu bar app works without it."
     exit 1
@@ -45,7 +47,16 @@ if [ ! -d "$PROJECT_DIR/AIQuotaBarWidget.xcodeproj" ]; then
 fi
 
 # ── Build ────────────────────────────────────────────────────────────────────
-echo "  ↓  Building widget…"
+# Every build needs a distinct CFBundleVersion. chronod treats an extension
+# at an unchanged bundle version as unchanged: it keeps serving its cached
+# render and never asks for a new timeline, so a rebuild at the same version
+# leaves a stale widget - or, on a freshly placed one, a widget stuck on its
+# placeholder. Restarting chronod, re-registering, and removing and re-adding
+# the widget do not clear it; only a version change does. A timestamp is
+# monotonic and always differs, which is all that matters here.
+BUILD_NUMBER=$(date +%s)
+
+echo "  ↓  Building widget… (build $BUILD_NUMBER)"
 xcodebuild \
     -project "$PROJECT_DIR/AIQuotaBarWidget.xcodeproj" \
     -scheme AIQuotaBarHost \
@@ -55,19 +66,52 @@ xcodebuild \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGNING_ALLOWED=NO \
     DEVELOPMENT_TEAM="" \
+    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
     2>&1 | tail -5
 
-# ── Install ──────────────────────────────────────────────────────────────────
+# ── Sign ─────────────────────────────────────────────────────────────────────
+# The build runs with CODE_SIGNING_ALLOWED=NO, which leaves a linker-signed
+# bundle with no entitlements and a placeholder identifier. macOS will not
+# register a widget extension in that state, so the widget never appears in
+# the picker. Ad-hoc sign both bundles with their real entitlements; the
+# extension needs its sandbox exception to read usage.json at all.
 BUILT_APP=$(find "$BUILD_DIR" -name "$APP_NAME" -type d | head -1)
 if [ -z "$BUILT_APP" ]; then
     echo "  ✗  Build failed — app bundle not found."
     exit 1
 fi
 
+echo "  ↓  Signing…"
+BUILT_EXT="$BUILT_APP/Contents/PlugIns/AIQuotaBarWidgetExtension.appex"
+# Wrapped so a failure reports itself instead of exiting silently under set -e.
+sign() {
+    local out
+    if ! out=$(codesign --force --sign - --timestamp=none --entitlements "$1" "$2" 2>&1); then
+        echo "  ✗  Signing failed for $(basename "$2"):"
+        echo "$out" | sed 's/^/     /'
+        exit 1
+    fi
+}
+sign "$PROJECT_DIR/AIQuotaBarWidgetExtension/AIQuotaBarWidgetExtension.entitlements" "$BUILT_EXT"
+sign "$PROJECT_DIR/AIQuotaBarHost/AIQuotaBarHost.entitlements" "$BUILT_APP"
+if ! codesign --verify --deep --strict "$BUILT_APP" 2>/dev/null; then
+    echo "  ✗  Signing failed — macOS will not register an unsigned widget."
+    exit 1
+fi
+echo "  ✓  Signed (ad-hoc, with entitlements)"
+
 INSTALL_PATH="/Applications/$APP_NAME"
 echo "  ↓  Installing to $INSTALL_PATH…"
 rm -rf "$INSTALL_PATH"
-cp -R "$BUILT_APP" "$INSTALL_PATH"
+# ditto, not cp -R: preserves extended attributes so the signature stays intact.
+ditto "$BUILT_APP" "$INSTALL_PATH"
+
+# Drop the build-directory copy from LaunchServices. Both copies share the
+# bundle id, and if the build copy stays registered the system can host the
+# widget from there instead of /Applications - silently serving stale code.
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+"$LSREGISTER" -u "$BUILT_APP" 2>/dev/null || true
+"$LSREGISTER" -f "$INSTALL_PATH" 2>/dev/null || true
 
 # Launch once to register the widget with the system
 open "$INSTALL_PATH"

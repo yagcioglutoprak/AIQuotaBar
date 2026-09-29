@@ -5,7 +5,7 @@ import WidgetKit
 // MARK: - Provider enum
 
 enum AIProvider: String, AppEnum, CaseIterable, Codable {
-    case claude, chatgpt, cursor, copilot, none
+    case claude, chatgpt, cursor, copilot
 
     static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "AI Provider")
     static var caseDisplayRepresentations: [AIProvider: DisplayRepresentation] = [
@@ -13,7 +13,6 @@ enum AIProvider: String, AppEnum, CaseIterable, Codable {
         .chatgpt: "ChatGPT",
         .cursor:  "Cursor",
         .copilot: "Copilot",
-        .none:    "None",
     ]
 
     var displayName: String {
@@ -22,7 +21,6 @@ enum AIProvider: String, AppEnum, CaseIterable, Codable {
         case .chatgpt: return "ChatGPT"
         case .cursor:  return "Cursor"
         case .copilot: return "Copilot"
-        case .none:    return "None"
         }
     }
 
@@ -32,7 +30,6 @@ enum AIProvider: String, AppEnum, CaseIterable, Codable {
         case .chatgpt: return Color(red: 0.45, green: 0.78, blue: 0.65) // mint
         case .cursor:  return Color(red: 0.40, green: 0.60, blue: 1.00) // blue
         case .copilot: return Color(red: 0.55, green: 0.75, blue: 0.95) // sky blue
-        case .none:    return .secondary
         }
     }
 
@@ -42,7 +39,6 @@ enum AIProvider: String, AppEnum, CaseIterable, Codable {
         case .chatgpt: return "chatgpt_icon"
         case .cursor:  return "cursor_icon"
         case .copilot: return "copilot_icon"
-        case .none:    return "questionmark.circle"
         }
     }
 
@@ -52,11 +48,8 @@ enum AIProvider: String, AppEnum, CaseIterable, Codable {
         case .chatgpt: return true
         case .cursor:  return true
         case .copilot: return true
-        case .none:    return true
         }
     }
-
-    var isReal: Bool { self != .none }
 }
 
 // MARK: - Widget configuration intent
@@ -71,21 +64,21 @@ struct SelectProvidersIntent: WidgetConfigurationIntent {
     @Parameter(title: "Provider 2", default: .chatgpt)
     var provider2: AIProvider
 
-    @Parameter(title: "Provider 3", default: .none)
-    var provider3: AIProvider
+    @Parameter(title: "Provider 3")
+    var provider3: AIProvider?
 
-    @Parameter(title: "Provider 4", default: .none)
-    var provider4: AIProvider
+    @Parameter(title: "Provider 4")
+    var provider4: AIProvider?
 
-    /// Active (non-none) providers in order.
+    /// Configured providers in order; empty slots drop out.
     var activeProviders: [AIProvider] {
-        [provider1, provider2, provider3, provider4].filter(\.isReal)
+        [provider1, provider2, provider3, provider4].compactMap { $0 }
     }
 
     /// True when user hasn't touched the widget config (all slots at compile-time defaults).
     var isUsingDefaults: Bool {
         provider1 == .claude && provider2 == .chatgpt
-            && provider3 == .none && provider4 == .none
+            && provider3 == nil && provider4 == nil
     }
 }
 
@@ -159,9 +152,6 @@ extension AIProvider {
                 ))
             }
             return ProviderDisplayData(mainPct: pct, rows: rows, error: nil, extraInfo: nil, isConfigured: true)
-
-        case .none:
-            return ProviderDisplayData(mainPct: 0, rows: [], error: nil, extraInfo: nil, isConfigured: false)
         }
     }
 }
