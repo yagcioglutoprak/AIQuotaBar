@@ -30,6 +30,31 @@ def _single_instance() -> bool:
     return True
 
 
+def _set_app_name(name: str = "AIQuotaBar") -> None:
+    """Show up as AIQuotaBar instead of "Python" (Activity Monitor, Force Quit).
+
+    The app runs inside Python's own app bundle, and macOS names the process
+    after that bundle's CFBundleName when it registers with the window server.
+    Renaming it in the in-memory info dictionary before NSApplication starts
+    changes the name it registers under. The command line is left alone, so
+    `pkill -f claude_bar.py` keeps working.
+    """
+    try:
+        from Foundation import NSBundle
+        bundle = NSBundle.mainBundle()
+    except Exception:
+        return
+    for get_info in ("infoDictionary", "localizedInfoDictionary"):
+        try:
+            info = getattr(bundle, get_info)()
+            current = info.get("CFBundleName") if info is not None else None
+            # Only rename the interpreter's bundle, never a real app bundle.
+            if isinstance(current, str) and current.lower().startswith("python"):
+                info["CFBundleName"] = name
+        except Exception:
+            pass
+
+
 def main():
     args = sys.argv[1:]
     if args and args[0] in ("--history", "-H"):
@@ -45,6 +70,7 @@ def main():
         print("AIQuotaBar is already running.")
         # Exit 0 so launchd's KeepAlive (crash-only) doesn't respawn us.
         sys.exit(0)
+    _set_app_name()
     from aiquotabar.ui import ClaudeBar
     ClaudeBar(demo=demo).run()
 
