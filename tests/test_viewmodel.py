@@ -253,6 +253,15 @@ def test_apply_setting_thresholds_must_stay_ordered():
     assert apply_setting(cfg, "crit_threshold", 90)
 
 
+def test_widget_enabled_setting():
+    cfg = {}
+    assert build_settings_state(cfg, widget_installed=True)["widget"] == {
+        "installed": True, "enabled": True}                   # on by default
+    assert not apply_setting(cfg, "widget_enabled", "off")
+    assert apply_setting(cfg, "widget_enabled", False) and cfg["widget_enabled"] is False
+    assert build_settings_state(cfg)["widget"]["enabled"] is False
+
+
 def test_settings_state_masks_api_keys():
     st = build_settings_state({"openai_key": "sk-abcdefghijklmnop1234"})
     key = next(k for k in st["api_keys"] if k["key"] == "openai_key")

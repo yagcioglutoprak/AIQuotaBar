@@ -679,12 +679,13 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
         "accounts": accounts,
         "api_keys": api_keys,
         "notifications": notifs,
-        "widget": {"installed": widget_installed},
+        "widget": {"installed": widget_installed,
+                   "enabled": bool(cfg.get("widget_enabled", True))},
         "repo_url": REPO_URL,
     }
 
 
-_BOOL_SETTINGS = {"bar_show_reset", "bar_show_cc"}
+_BOOL_SETTINGS = {"bar_show_reset", "bar_show_cc", "widget_enabled"}
 
 
 def apply_setting(cfg: dict, key: str, value) -> bool:

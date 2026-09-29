@@ -42,7 +42,7 @@ from aiquotabar.viewmodel import (
     build_panel_state, build_settings_state, build_history_state,
     bar_segments, menu_lines, apply_setting, fmt_count, fmt_duration, history_key,
 )
-from aiquotabar.widget import _write_widget_cache, _is_widget_installed
+from aiquotabar.widget import _write_widget_cache, _is_widget_installed, _quit_widget_host
 from aiquotabar.update import _check_and_apply_update, _restart_app
 
 
@@ -818,6 +818,12 @@ class ClaudeBar(rumps.App):
             self._timer.start()
         if key in ("warn_threshold", "crit_threshold"):
             self._warned_pcts.clear()
+        if key == "widget_enabled" and not self._demo:
+            if value:
+                _write_widget_cache(self._last_data or UsageData(), self._provider_data,
+                                    self._cc_stats, self.config)
+            else:
+                _quit_widget_host()     # close its window now, not at next login
         self._post_update()
 
     def _set_login(self, on: bool):
