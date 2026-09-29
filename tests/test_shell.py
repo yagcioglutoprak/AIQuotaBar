@@ -143,6 +143,19 @@ def test_settings_actions_are_validated(ui):
     host._receive("not json")
 
 
+def test_menu_bar_title_tags_several_claude_limits(ui):
+    app = start(ui.ClaudeBar(demo=True))
+    app._fetch_and_update()
+    app.config.update(claude_bar_metrics=["session", "weekly"], bar_show_cc=False)
+    fake_macos.CALLS.clear()
+    app._update_title(app._snapshot())
+    pieces = [args[0] for _, m, args in fake_macos.CALLS if m == "initWithString_attributes_"]
+    icons = [1 for obj, m, _ in fake_macos.CALLS if obj == "NSTextAttachment" and m == "setImage_"]
+    # One Claude icon for both limits, each tagged; ChatGPT keeps its own icon.
+    assert "".join(pieces) == " 5h 78%  7d 41%    64%" and len(icons) == 2
+    assert any(m == "setAttributedTitle_" for _, m, _ in fake_macos.CALLS)
+
+
 def test_open_url_allow_list(ui):
     app = start(ui.ClaudeBar(demo=True))
     send(app._panel.host, action="open_url", url="https://claude.ai/settings/usage")

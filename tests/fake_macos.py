@@ -33,6 +33,7 @@ RETURNS = {
     "length": lambda *a: 0,
     "type": lambda *a: 1,
     "modifierFlags": lambda *a: 0,
+    "pointSize": lambda *a: 13.0,
 }
 
 
