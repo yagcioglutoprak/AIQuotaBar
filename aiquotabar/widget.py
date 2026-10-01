@@ -41,14 +41,18 @@ def _write_widget_cache(
                 "cursor_cookies":  "cursor",
             }
             for cfg_key, prov_id in _key_map.items():
-                if cfg.get(cfg_key):
+                # ChatGPT may be signed in through Codex CLI, with no cookie.
+                via_codex = prov_id == "chatgpt" and any(
+                    p.name == "ChatGPT" and p.source == "codex" and not p.error for p in providers)
+                if cfg.get(cfg_key) or via_codex:
                     active.append(prov_id)
             # Fallback: always show at least Claude
             return active or ["claude"]
 
         def _bar_providers(cfg: dict) -> list[str] | None:
-            """User's explicit bar provider choices (lowercase IDs), or None for auto."""
-            chosen = cfg.get("bar_providers")
+            """User's explicit bar provider choices (lowercase IDs), or None for auto.
+            Extra accounts (claude@1a2b3c4d) are menu bar-only; the widget shows main accounts."""
+            chosen = [n for n in cfg.get("bar_providers") or [] if "@" not in n]
             if not chosen:
                 return None
             return [n.lower() for n in chosen]

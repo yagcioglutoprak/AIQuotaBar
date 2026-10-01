@@ -13,6 +13,7 @@ import os
 import time
 from dataclasses import dataclass, field
 
+from aiquotabar import accounts as acc
 from aiquotabar import theme
 from aiquotabar.config import (
     NOTIF_DEFAULTS, PACING_ALERT_MINUTES, REFRESH_INTERVALS,
@@ -83,6 +84,8 @@ class Snapshot:
     updated_at: float | None = None
     fetching: bool = False
     detecting: set = field(default_factory=set)       # provider ids being auto-detected
+    accounts: list = field(default_factory=list)      # accounts.AccountUsage for extra accounts
+    claude_label: str | None = None                   # main Claude account (org name / email)
     now: float = field(default_factory=time.time)
 
 
@@ -225,15 +228,25 @@ def _brand(pid: str) -> dict:
             "icon": p["icon"], "mask": p["tint"] is not None}
 
 
-def _friendly_error(pid: str, message: str | None) -> dict:
-    """Map a raw fetch error to something a person can act on."""
+def _friendly_error(pid: str, message: str | None, source: str = "",
+                    extra: bool = False) -> dict:
+    """Map a raw fetch error to something a person can act on.
+
+    `extra`: the error belongs to an extra account, which reconnects by
+    re-scanning for accounts rather than re-detecting the main one.
+    """
     msg = (message or "").lower()
     name = theme.PROVIDERS[pid]["name"]
     domain = SIGN_IN_DOMAINS[pid]
+    reconnect = {"id": "find_accounts" if extra else "detect", "provider": pid, "label": "Reconnect"}
     if any(s in msg for s in ("401", "403", "not logged in", "session", "expired", "unauthorized")):
+        if source == "codex":
+            return {"title": "Codex sign-in expired",
+                    "detail": "Run codex in Terminal to refresh it, or sign in to chatgpt.com.",
+                    "action": reconnect}
         return {"title": "Signed out",
                 "detail": f"Sign in to {domain} in your browser, then reconnect.",
-                "action": {"id": "detect", "provider": pid, "label": "Reconnect"}}
+                "action": reconnect}
     if any(s in msg for s in ("timed out", "timeout", "resolve", "connection", "network")):
         return {"title": "Can't reach " + name,
                 "detail": "Check your connection. Retrying automatically.",
@@ -270,29 +283,37 @@ def _claude_card(snap: Snapshot) -> dict | None:
     cfg = snap.config
     if "claude" in cfg.get("disabled_providers", []):
         return None
+    loading = "claude" in snap.detecting or (snap.claude_error is None and snap.fetching)
+    return _claude_card_for(snap, snap.claude, snap.claude_error, "claude", loading)
+
+
+def _claude_card_for(snap: Snapshot, data: UsageData | None, err: dict | None,
+                     key: str, loading: bool, account: dict | None = None) -> dict | None:
+    """A Claude card. `key` is its history key: "claude" for the main account,
+    the account key (claude@1a2b3c4d) for an extra one."""
     card = _brand("claude")
     card["usage_url"] = USAGE_PAGES["claude"]
-    data = snap.claude
+    if account:
+        card.update(account=account.get("label") or "Claude account", account_key=account["key"])
     rows = []
     if data:
         rows = [(r, k, m) for r, k, m in (
-            (data.session, "claude", "session"), (data.weekly_all, None, "weekly"),
+            (data.session, key, "session"), (data.weekly_all, None, "weekly"),
             (data.weekly_sonnet, None, "weekly_sonnet"), (data.weekly_opus, None, None)) if r]
     if rows:
         meters = []
-        for row, key, metric in rows:
+        for row, mkey, metric in rows:
             label, sub = _CLAUDE_LABELS.get(row.label, (row.label, ""))
-            meter = _row_meter(key, row, label, sub, snap)
+            meter = _row_meter(mkey, row, label, sub, snap)
             meter["metric"] = metric
             meters.append(meter)
         card.update(state="ok", meters=meters, status=_card_status(meters),
-                    trend=_trend(snap, "claude"),
-                    hits=snap.week_hits.get("claude", 0))
-        if snap.claude_error and snap.claude_error.get("kind") in ("auth", "network"):
+                    trend=_trend(snap, key),
+                    hits=snap.week_hits.get(key, 0))
+        if err and err.get("kind") in ("auth", "network"):
             card["stale"] = True
         return card
-    err = snap.claude_error
-    if "claude" in snap.detecting or (err is None and snap.fetching):
+    if loading:
         card.update(state="loading", meters=[])
         return card
     if err is None:
@@ -304,17 +325,19 @@ def _claude_card(snap: Snapshot) -> dict | None:
             "action": {"id": "detect", "provider": "claude", "label": "Detect"}})
     else:
         card.update(state="error", meters=[],
-                    error=_friendly_error("claude", err.get("message")))
+                    error=_friendly_error("claude", err.get("message"), extra=bool(account)))
     return card
 
 
-def _multi_row_card(pid: str, pd: ProviderData, snap: Snapshot) -> dict:
+def _multi_row_card(pid: str, pd: ProviderData, snap: Snapshot, prefix: str | None = None) -> dict:
+    """Card for a provider that reports several rows. `prefix` names the
+    history keys: the provider id, or an extra account's key."""
     card = _brand(pid)
     card["usage_url"] = USAGE_PAGES[pid]
     rows = getattr(pd, "_rows", None) or []
     meters = []
     for row in rows:
-        key = history_key(pid, row.label)
+        key = history_key(prefix or pid, row.label)
         label = _humanize(row.label)
         if pid == "cursor":
             label = f"{row.label} usage"
@@ -363,11 +386,49 @@ def _provider_card(pid: str, snap: Snapshot) -> dict | None:
     if pd.error:
         card = _brand(pid)
         card["usage_url"] = USAGE_PAGES[pid]
-        card.update(state="error", meters=[], error=_friendly_error(pid, pd.error))
+        card.update(state="error", meters=[],
+                    error=_friendly_error(pid, pd.error, getattr(pd, "source", "")))
         return card
     if pid == "copilot":
         return _copilot_card(pd, snap)
     return _multi_row_card(pid, pd, snap)
+
+
+def _extra_cards(pid: str, snap: Snapshot) -> list[dict]:
+    """One card per extra account of `pid`, in the order they were added."""
+    if pid not in acc.MULTI_PROVIDERS or pid in snap.config.get("disabled_providers", []):
+        return []
+    results = {u.key: u for u in snap.accounts}
+    cards = []
+    for a in acc.extra_accounts(snap.config, pid):
+        u = results.get(a["key"])
+        loading = u is None or (u.error is None and pid in snap.detecting)
+        if pid == "claude":
+            card = _claude_card_for(snap, u.claude if u else None, u.error if u else None,
+                                    a["key"], loading, a)
+        elif u is not None and u.data is not None:
+            card = _multi_row_card(pid, u.data, snap, prefix=a["key"])
+            if u.error:
+                card["stale"] = True
+        else:
+            card = _brand(pid)
+            card["usage_url"] = USAGE_PAGES[pid]
+            if u is not None and u.error:
+                card.update(state="error", meters=[], error=_friendly_error(
+                    pid, u.error.get("message"), a.get("source", ""), extra=True))
+            else:
+                card.update(state="loading", meters=[])
+        if card:
+            card.update(account=a.get("label") or f"{card['name']} account", account_key=a["key"])
+            cards.append(card)
+    return cards
+
+
+def _primary_label(pid: str, snap: Snapshot) -> str:
+    if pid == "claude":
+        return snap.claude_label or "Main account"
+    pd = next((p for p in snap.providers if p.name == theme.PROVIDERS[pid]["name"]), None)
+    return (getattr(pd, "account_label", "") if pd else "") or "Main account"
 
 
 def _extras(snap: Snapshot) -> list[dict]:
@@ -426,6 +487,9 @@ def _pick_hero(cards: list[dict]) -> dict | None:
         return None
     card, m = best
     m["hero"] = True
+    account = card.get("account")
+    if account:     # short, so the hero line fits: "Claude (acme) · Current session"
+        account = acc.short_tag(account, [c.get("account") for c in cards if c["id"] == card["id"]])
     for other in cards:
         if other is not card:
             other["trend"] = None
@@ -448,7 +512,8 @@ def _pick_hero(cards: list[dict]) -> dict | None:
             insight = {"tone": "info", "text": "Worth keeping an eye on"}
     return {
         "provider": card["id"], "name": card["name"], "color": card["color"],
-        "icon": card["icon"], "mask": card["mask"],
+        "icon": card["icon"], "mask": card["mask"], "account": account,
+        "account_full": card.get("account"),
         "label": m["label"], "pct": m["pct"], "severity": m["severity"],
         "headline": "Limit reached" if left == 0 else f"{left}% left",
         "reset_ts": m["reset_ts"], "reset_text": m["reset_text"],
@@ -464,13 +529,15 @@ def _connect_hint(snap: Snapshot, shown: set) -> list[dict]:
 
 def build_panel_state(snap: Snapshot) -> dict:
     cards = []
-    c = _claude_card(snap)
-    if c:
-        cards.append(c)
-    for pid in theme.PROVIDER_ORDER[1:]:
-        card = _provider_card(pid, snap)
+    for pid in theme.PROVIDER_ORDER:
+        card = _claude_card(snap) if pid == "claude" else _provider_card(pid, snap)
+        extras = _extra_cards(pid, snap)
+        if card and extras:
+            # Several accounts: say which one each card is.
+            card["account"] = _primary_label(pid, snap)
         if card:
             cards.append(card)
+        cards += extras
 
     interval = snap.config.get("refresh_interval", 300)
     stale = bool(snap.updated_at and snap.now - snap.updated_at > max(3 * interval, 900))
@@ -525,8 +592,8 @@ def share_summary(cards: list[dict], config: dict | None = None) -> dict:
     items = []
     for card in cards:
         meters = card.get("meters") or []
-        if not meters:
-            continue
+        if not meters or card.get("account_key"):
+            continue        # one tile per service; extra accounts (and their emails) stay private
         m = _share_meter(card, config or {})
         rest = [x for x in meters if x is not m]
         items.append({"id": card["id"], "name": card["name"], "color": card["color"],
@@ -559,7 +626,7 @@ def _claude_bar_segments(data: UsageData, cfg: dict) -> list[dict]:
     for metric, row in rows:
         sev = severity(row.pct, cfg)
         segs.append({
-            "id": "claude", "name": "Claude", "pct": row.pct, "severity": sev,
+            "id": "claude", "name": "Claude", "account": None, "pct": row.pct, "severity": sev,
             "reset_ts": row.resets_at,
             "tag": CLAUDE_BAR_METRICS[metric][1] if tagged else None,
             # A lone session number gets a trailing "·" when a weekly limit is
@@ -594,16 +661,56 @@ def bar_segments(snap: Snapshot) -> list[dict]:
             pct, reset_ts = pd.pct, pd.resets_at
         else:
             continue
-        available[pd.name] = [{"id": pid, "name": pd.name, "pct": pct,
+        available[pd.name] = [{"id": pid, "name": pd.name, "account": None, "pct": pct,
                                "severity": severity(pct, snap.config),
                                "reset_ts": reset_ts, "tag": None, "weekly_maxed": False}]
     order = [theme.PROVIDERS[p]["name"] for p in theme.PROVIDER_ORDER]
     chosen = snap.config.get("bar_providers")
     if chosen:
+        available.update(_account_bar_segments(snap, chosen))
         names = [n for n in chosen if n in available]
     else:
         names = [n for n in order if n in available][:2]
     return [seg for n in names for seg in available[n]]
+
+
+def _account_bar_segments(snap: Snapshot, chosen: list) -> dict[str, list[dict]]:
+    """Segments for the extra accounts picked in Settings → Menu bar.
+
+    Each shows its worst row (Claude: the first chosen limit) behind a short
+    tag taken from the account's name, e.g. "work 34%".
+    """
+    disabled = set(snap.config.get("disabled_providers", []))
+    out: dict[str, list[dict]] = {}
+    for u in snap.accounts:
+        if u.key not in chosen or u.provider in disabled:
+            continue
+        if u.provider == "claude" and u.claude:
+            seg = (_claude_bar_segments(u.claude, snap.config) or [None])[0]
+            if seg is None:
+                continue
+            seg = {**seg, "tag": None}
+        elif u.data is not None and (getattr(u.data, "_rows", None) or []):
+            worst = max(u.data._rows, key=lambda r: r.pct)
+            seg = {"id": u.provider, "pct": worst.pct, "severity": severity(worst.pct, snap.config),
+                   "reset_ts": worst.resets_at, "weekly_maxed": False}
+        else:
+            continue
+        name = theme.PROVIDERS[u.provider]["name"]
+        others = [_primary_label(u.provider, snap)] + [x.label for x in snap.accounts
+                                                       if x.provider == u.provider]
+        seg.update(name=f"{name} · {u.label}", account=u.key, tag=acc.short_tag(u.label, others))
+        out[u.key] = [seg]
+    return out
+
+
+def bar_choice_order(cfg: dict) -> list[str]:
+    """Every menu bar choice in display order: each service, then its extra accounts."""
+    out = []
+    for pid in theme.PROVIDER_ORDER:
+        out.append(theme.PROVIDERS[pid]["name"])
+        out += [a["key"] for a in acc.extra_accounts(cfg, pid)]
+    return out
 
 
 def bar_auto_names(snap: Snapshot) -> list[str]:
@@ -624,7 +731,7 @@ def menu_lines(panel: dict) -> list[str | None]:
     dot = {"ok": "🟢", "warn": "🟡", "crit": "🔴"}
     lines: list[str | None] = []
     for card in panel["cards"]:
-        lines.append(card["name"].upper())
+        lines.append(card["name"].upper() + (f"  ·  {card['account']}" if card.get("account") else ""))
         if card.get("error"):
             lines.append(f"  ⚠️  {card['error']['title']} — {card['error']['detail']}")
         for m in card.get("meters") or []:
@@ -660,9 +767,34 @@ def _mask_key(key: str) -> str:
     return (key[:3] + "…" + key[-4:]) if len(key) > 10 else "••••"
 
 
+def _source_text(source: str) -> str:
+    return "Codex CLI" if source == "codex" else (source or "browser session")
+
+
+def _extra_rows(pid: str, snap: Snapshot) -> list[dict]:
+    """Settings rows for the extra accounts of one provider."""
+    results = {u.key: u for u in snap.accounts}
+    rows = []
+    for a in acc.extra_accounts(snap.config, pid):
+        u = results.get(a["key"])
+        src = _source_text(a.get("source", ""))
+        if u is None:
+            status, detail = "busy", "Checking…"
+        elif u.error:
+            status = "error"
+            detail = _friendly_error(pid, u.error.get("message"), a.get("source", ""),
+                                     extra=True)["title"] + " · " + src
+        else:
+            status, detail = "on", src
+        rows.append({"key": a["key"], "label": a.get("label") or "Account",
+                     "status": status, "detail": detail})
+    return rows
+
+
 def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
                          launch_at_login: bool = False, widget_installed: bool = False,
-                         version: str = "", tab: str | None = None) -> dict:
+                         version: str = "", tab: str | None = None,
+                         tcc_app: str = "") -> dict:
     snap = snap or Snapshot(config=cfg)
     disabled = set(cfg.get("disabled_providers", []))
     accounts = []
@@ -670,25 +802,36 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
         b = _brand(pid)
         name = b["name"]
         connected = bool(cfg.get(COOKIE_KEYS[pid]))
-        err = None
+        err, source, label = None, "", ""
         if pid == "claude":
             if snap.claude_error and snap.claude_error.get("kind") != "missing":
                 err = snap.claude_error.get("message")
+            label = snap.claude_label or ""
         else:
             pd = next((p for p in snap.providers if p.name == name), None)
             err = pd.error if pd else None
+            source = getattr(pd, "source", "") if pd else ""
+            label = getattr(pd, "account_label", "") if pd else ""
+            if source == "codex":
+                connected = True        # signed in through Codex CLI, no browser cookie needed
         if pid in disabled:
             status, detail = "off", "Turned off"
         elif pid in snap.detecting:
             status, detail = "busy", "Looking in your browsers…"
         elif err and connected:
-            status, detail = "error", _friendly_error(pid, err)["title"]
+            status, detail = "error", _friendly_error(pid, err, source)["title"]
         elif connected:
-            status, detail = "on", "Connected via browser session"
+            via = "Codex CLI" if source == "codex" else "browser session"
+            status, detail = "on", f"{label} · {via}" if label else f"Connected via {via}"
+        elif pid == "chatgpt":
+            status, detail = "missing", "Sign in to chatgpt.com in your browser, or to Codex CLI"
         else:
             status, detail = "missing", f"Sign in to {SIGN_IN_DOMAINS[pid]} in your browser"
         b.update(status=status, detail=detail, manual=pid == "claude",
                  usage_url=USAGE_PAGES[pid])
+        if pid in acc.MULTI_PROVIDERS:
+            b.update(multi=True, extras=[] if pid in disabled else _extra_rows(pid, snap),
+                     hidden=acc.hidden_count(cfg, pid))
         accounts.append(b)
 
     api_keys = []
@@ -706,9 +849,26 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
                        "items": [{"key": k, "label": lbl, "on": notif_enabled(cfg, k)}
                                  for k, lbl in items]})
     warn, crit = thresholds(cfg)
-    names = [theme.PROVIDERS[p]["name"] for p in theme.PROVIDER_ORDER]
     chosen = cfg.get("bar_providers") or []
     auto = bar_auto_names(snap) if not chosen else []
+    extras = {a["key"]: a for a in acc.extra_accounts(cfg)
+              if a["provider"] not in disabled}
+    others = {pid: [_primary_label(pid, snap)] + [a.get("label", "") for a in extras.values()
+                                                  if a["provider"] == pid]
+              for pid in acc.MULTI_PROVIDERS}
+    bar_choices = []
+    for value in bar_choice_order(cfg):
+        a = extras.get(value)
+        if acc.is_account_key(value) and a is None:
+            continue
+        pid = a["provider"] if a else theme.NAME_TO_ID[value]
+        p = theme.PROVIDERS[pid]
+        bar_choices.append({
+            "name": f"{p['name']} · {a.get('label') or 'account'}" if a else value,
+            "value": value, "id": pid, "base": p["name"], "color": p["color"], "icon": p["icon"],
+            "mask": p["tint"] is not None, "account": bool(a),
+            "tag": acc.short_tag(a.get("label", ""), others[pid]) if a else None,
+            "on": (value in chosen) if chosen else (value in auto)})
     return {
         "view": "settings",
         "tab": tab or "general",
@@ -718,14 +878,11 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
             "refresh_interval": cfg.get("refresh_interval", 300),
             "intervals": [{"secs": v, "label": k} for k, v in REFRESH_INTERVALS.items()],
             "warn": warn, "crit": crit,
+            "classic_menu": bool(cfg.get("classic_menu", False)),
         },
         "menubar": {
             "auto": not chosen,
-            "providers": [{"name": n, "id": theme.NAME_TO_ID[n],
-                           "color": theme.PROVIDERS[theme.NAME_TO_ID[n]]["color"],
-                           "icon": theme.PROVIDERS[theme.NAME_TO_ID[n]]["icon"],
-                           "mask": theme.PROVIDERS[theme.NAME_TO_ID[n]]["tint"] is not None,
-                           "on": (n in chosen) if chosen else (n in auto)} for n in names],
+            "providers": bar_choices,
             "claude_metrics": [{"id": m, "label": label, "on": m in claude_bar_metrics(cfg)}
                                for m, (_f, _t, label) in CLAUDE_BAR_METRICS.items()],
             "show_reset": bool(cfg.get("bar_show_reset", False)),
@@ -736,11 +893,12 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
         "notifications": notifs,
         "widget": {"installed": widget_installed,
                    "enabled": bool(cfg.get("widget_enabled", True))},
+        "tcc_app": tcc_app,
         "repo_url": REPO_URL,
     }
 
 
-_BOOL_SETTINGS = {"bar_show_reset", "bar_show_cc", "widget_enabled"}
+_BOOL_SETTINGS = {"bar_show_reset", "bar_show_cc", "widget_enabled", "classic_menu"}
 
 
 def apply_setting(cfg: dict, key: str, value) -> bool:
@@ -760,12 +918,11 @@ def apply_setting(cfg: dict, key: str, value) -> bool:
             return True
         return False
     if key == "bar_providers":
-        names = {p["name"] for p in theme.PROVIDERS.values()}
+        order = bar_choice_order(cfg)       # service names + extra account keys
         if value is None or value == []:
             cfg.pop("bar_providers", None)
             return True
-        if isinstance(value, list) and all(isinstance(v, str) and v in names for v in value):
-            order = [theme.PROVIDERS[p]["name"] for p in theme.PROVIDER_ORDER]
+        if isinstance(value, list) and all(isinstance(v, str) and v in order for v in value):
             cfg[key] = [n for n in order if n in value]
             return True
         return False
@@ -795,28 +952,43 @@ def apply_setting(cfg: dict, key: str, value) -> bool:
 
 # ── history window ───────────────────────────────────────────────────────────
 
-def history_label(key: str) -> str:
+def history_label(key: str, labels: dict | None = None) -> str:
+    """'chatgpt_codex_tasks' -> 'ChatGPT · codex tasks'. Extra accounts
+    ('claude@1a2b3c4d', 'chatgpt@1a2b3c4d_codex_tasks') get their name from
+    `labels` (account key -> label)."""
+    acct = ""
+    head, sep, tail = key.partition("_")
+    if acc.is_account_key(head):
+        name = (labels or {}).get(head) or "other account"
+        acct = f" ({name})"
+        key = head.split("@")[0] + sep + tail
     if key == "claude":
-        return "Claude · session"
+        return f"Claude{acct} · session"
     if key == "copilot":
         return "Copilot · premium requests"
     for pid in ("chatgpt", "cursor"):
         if key.startswith(pid + "_"):
             rest = key[len(pid) + 1:].replace("_", " ")
             rest = "API" if rest == "api" else rest
-            return f"{theme.PROVIDERS[pid]['name']} · {rest}"
+            return f"{theme.PROVIDERS[pid]['name']}{acct} · {rest}"
     return key.replace("_", " ").title()
 
 
-def build_history_state(daily: list[tuple], trends: dict, now: float | None = None) -> dict:
+def history_provider(key: str) -> str | None:
+    return next((p for p in theme.PROVIDER_ORDER
+                 if key == p or key.startswith(p + "_") or key.startswith(p + "@")), None)
+
+
+def build_history_state(daily: list[tuple], trends: dict, now: float | None = None,
+                        labels: dict | None = None) -> dict:
     """daily: rows of (date, key, peak_pct, avg_pct, limit_hits) for up to 90 days
-    (today included). trends: key -> [(ts, pct)] for the last 24 hours."""
+    (today included). trends: key -> [(ts, pct)] for the last 24 hours.
+    labels: extra account key -> name, for those accounts' series."""
     now = now or time.time()
     series: dict[str, dict] = {}
     for date, key, peak, avg, hits in daily:
-        s = series.setdefault(key, {"key": key, "label": history_label(key),
-                                    "provider": next((p for p in theme.PROVIDER_ORDER
-                                                      if key == p or key.startswith(p + "_")), None),
+        s = series.setdefault(key, {"key": key, "label": history_label(key, labels),
+                                    "provider": history_provider(key),
                                     "color": theme.history_color(key), "days": []})
         s["days"].append({"date": date, "peak": int(peak), "avg": int(avg), "hits": int(hits)})
     order = {p: i for i, p in enumerate(theme.PROVIDER_ORDER)}
@@ -826,7 +998,7 @@ def build_history_state(daily: list[tuple], trends: dict, now: float | None = No
         "view": "history",
         "now": now,
         "series": out,
-        "trends": [{"key": k, "label": history_label(k), "color": theme.history_color(k),
+        "trends": [{"key": k, "label": history_label(k, labels), "color": theme.history_color(k),
                     "points": [[round(t), int(p)] for t, p in pts]}
                    for k, pts in trends.items() if len(pts) >= 2],
     }

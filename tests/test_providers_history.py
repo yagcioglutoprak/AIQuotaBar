@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 import time
@@ -230,6 +231,191 @@ def test_detection_ignores_look_alike_cookie_names(fake_browsers):
                    "firefox": [["sessionKeyLC", "z", 2e9]]})
     assert providers._run_cookie_detection("chatgpt.com", TOKEN) == []
     assert providers._run_cookie_detection("claude.ai", "sessionKey") == []
+
+
+# ── ChatGPT via Codex CLI, account ids, multi-account helpers ────────────────
+
+def _jwt(claims: dict) -> str:
+    body = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"h.{body}.sig"
+
+
+WS = "11111111-2222-3333-4444-555555555555"
+
+
+def _codex_file(tmp_path, monkeypatch, exp=None, account_id="acct-codex"):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+    (tmp_path / "codex").mkdir()
+    access = _jwt({"exp": exp or time.time() + 3600,
+                   "https://api.openai.com/auth": {"chatgpt_account_id": "acct-from-jwt"}})
+    (tmp_path / "codex" / "auth.json").write_text(json.dumps({
+        "OPENAI_API_KEY": None, "last_refresh": "2026-09-30T10:00:00Z",
+        "tokens": {"access_token": access, "refresh_token": "never-used",
+                   "id_token": _jwt({"email": "me@lab.org"}), "account_id": account_id}}))
+    return access
+
+
+def _record_requests(monkeypatch, body=None, status=200):
+    seen = []
+
+    def fake_get(url, headers=None, cookies=None, **kw):
+        seen.append({"url": url, "headers": dict(headers or {}), "cookies": dict(cookies or {})})
+        return _Resp(status, body if body is not None else _WHAM)
+    monkeypatch.setattr(providers.requests, "get", fake_get)
+    return seen
+
+
+def test_read_codex_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nothing-here"))
+    assert providers.read_codex_auth() is None
+    access = _codex_file(tmp_path, monkeypatch)
+    auth = providers.read_codex_auth()
+    assert auth["access_token"] == access and auth["account_id"] == "acct-codex"
+    assert auth["email"] == "me@lab.org" and auth["expires_at"] > time.time()
+    # An API-key login has no tokens, so no plan limits.
+    (tmp_path / "codex" / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-x", "tokens": None}))
+    assert providers.read_codex_auth() is None
+
+
+def test_codex_fetch_sends_token_and_account_id(tmp_path, monkeypatch):
+    access = _codex_file(tmp_path, monkeypatch)
+    seen = _record_requests(monkeypatch)
+    pd = providers.fetch_chatgpt_codex()
+    assert pd.error is None and pd.spent == 30.0 and pd.source == "codex"
+    assert pd.account_label == "me@lab.org" and pd.account_id == "acct-codex"
+    (req,) = seen
+    assert req["url"].endswith("/backend-api/wham/usage")
+    assert req["headers"]["Authorization"] == f"Bearer {access}"
+    assert req["headers"]["ChatGPT-Account-Id"] == "acct-codex"
+    assert req["cookies"] == {}
+
+
+def test_expired_codex_token_is_not_used(tmp_path, monkeypatch):
+    _codex_file(tmp_path, monkeypatch, exp=time.time() - 60)
+    seen = _record_requests(monkeypatch)
+    pd = providers.fetch_chatgpt_codex()
+    assert pd.error == "Codex sign-in expired" and seen == []
+
+
+def test_browser_session_workspace_and_email(monkeypatch):
+    token = _jwt({"https://api.openai.com/auth": {"chatgpt_account_id": "acct-1"},
+                  "https://api.openai.com/profile": {"email": "me@home.com"}})
+    seen = []
+
+    def fake_get(url, headers=None, cookies=None, **kw):
+        seen.append(dict(headers or {}))
+        return _Resp(200, {"accessToken": token} if url.endswith("/session") else _WHAM)
+    monkeypatch.setattr(providers.requests, "get", fake_get)
+
+    pd = providers.fetch_chatgpt(f"__Secure-next-auth.session-token.0=a; _account={WS}")
+    assert pd.account_label == "me@home.com" and pd.account_id == WS and pd.source == "browser"
+    assert seen[-1]["ChatGPT-Account-Id"] == WS        # the workspace picked in ChatGPT
+    pd = providers.fetch_chatgpt("__Secure-next-auth.session-token=a; _account=personal")
+    assert "ChatGPT-Account-Id" not in seen[-1] and pd.account_id == "acct-1"
+    assert providers.chatgpt_identity(f"x=1; _account={WS}") == (WS, "me@home.com")
+
+
+def test_chatgpt_fallback_order():
+    ok = providers.ProviderData("ChatGPT", spent=1.0, limit=100.0, source="browser")
+    bad = providers.ProviderData("ChatGPT", error="401 Unauthorized", source="browser")
+    codex_pd = providers.ProviderData("ChatGPT", spent=9.0, limit=100.0, source="codex")
+    auth = {"access_token": "t", "account_id": "a", "email": "", "expires_at": None}
+    orig = providers.fetch_chatgpt_codex
+    try:
+        providers.fetch_chatgpt_codex = lambda a: codex_pd
+        f = providers.fetch_chatgpt_with_fallback
+        assert f("c", auth, lambda c: ok) is ok                        # browser first
+        assert f("c", auth, lambda c: bad) is codex_pd                 # stale browser -> Codex
+        assert f(None, auth, lambda c: bad) is codex_pd                # no browser session
+        assert f("c", None, lambda c: bad) is bad                      # no Codex: browser error
+        assert f(None, None, lambda c: ok).error == "Not logged in"
+        providers.fetch_chatgpt_codex = lambda a: providers.ProviderData("ChatGPT", error="x")
+        assert f("c", auth, lambda c: bad) is bad                      # both fail: browser error
+    finally:
+        providers.fetch_chatgpt_codex = orig
+
+
+def test_claude_orgs_and_labels(monkeypatch):
+    monkeypatch.setattr(providers, "_get", lambda url, cookies: [
+        {"uuid": "u1", "name": "me@home.com's Organization", "capabilities": ["chat", "claude_pro"]},
+        {"uuid": "u2", "name": "Acme", "capabilities": ["chat", "claude_team"]},
+        {"uuid": "u3", "name": "Acme API", "capabilities": ["api"]},
+        {"id": "legacy", "name": "Old"},
+        {"name": "no id"},
+    ])
+    orgs = providers.claude_orgs("sessionKey=x")
+    assert [(o["uuid"], o["label"], o["chat"]) for o in orgs] == [
+        ("u1", "me@home.com", True), ("u2", "Acme", True), ("u3", "Acme API", False),
+        ("legacy", "Old", True)]
+    assert providers.claude_default_org("sessionKey=x", orgs) == "u1"
+    assert providers.claude_default_org("sessionKey=x; lastActiveOrg=u2", orgs) == "u2"
+    assert providers.claude_org_label("jo’s Organization") == "jo"
+
+
+def test_fetch_raw_uses_an_explicit_org(monkeypatch):
+    urls = []
+    monkeypatch.setattr(providers, "_get", lambda url, cookies: urls.append(url) or {})
+    raw = providers.fetch_raw("sessionKey=x; lastActiveOrg=cookie-org", org_id="other-org")
+    assert raw["org_id"] == "other-org" and urls == [
+        "https://claude.ai/api/organizations/other-org/usage"]
+
+
+def test_browser_profiles(tmp_path):
+    sup = tmp_path / "Library" / "Application Support"
+    chrome = sup / "Google" / "Chrome"
+    for prof, net in (("Default", True), ("Profile 1", False), ("System Profile", True)):
+        d = chrome / prof / ("Network" if net else "")
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "Cookies").write_text("")
+    (chrome / "Default" / "Cookies").write_text("")        # stale pre-Network copy
+    (chrome / "Local State").write_text(json.dumps(
+        {"profile": {"info_cache": {"Default": {"name": "Personal"}, "Profile 1": {"name": "Work"}}}}))
+    ff = sup / "Firefox" / "Profiles" / "ab12.default-release"
+    ff.mkdir(parents=True)
+    (ff / "cookies.sqlite").write_text("")
+    specs = providers.browser_profiles(str(tmp_path))
+    assert specs[:3] == [
+        ["chrome", str(chrome / "Default" / "Network" / "Cookies"), "Chrome · Personal"],
+        ["chrome", str(chrome / "Profile 1" / "Cookies"), "Chrome · Work"],
+        ["firefox", str(ff / "cookies.sqlite"), "Firefox · default-release"]]
+    assert ["safari", None, "Safari"] in specs and not any("System" in s[2] for s in specs)
+
+
+_FAKE_PROFILE_COOKIE3 = """
+import json, os
+
+class _C:
+    def __init__(self, name, value, expires):
+        self.name, self.value, self.expires = name, value, expires
+
+_JARS = json.loads(os.environ["FAKE_JARS"])
+
+def _jar(browser):
+    def fn(cookie_file=None, domain_name=None):
+        key = cookie_file or browser
+        if key not in _JARS:
+            raise RuntimeError("no profile")
+        return [_C(*c) for c in _JARS[key]]
+    return fn
+
+firefox = _jar("firefox")
+chrome = _jar("chrome")
+"""
+
+
+def test_discover_sessions_reads_every_profile(tmp_path, monkeypatch):
+    (tmp_path / "browser_cookie3.py").write_text(_FAKE_PROFILE_COOKIE3)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setattr(providers, "browser_profiles", lambda: [
+        ["chrome", "/p/Default", "Chrome · Personal"], ["chrome", "/p/Work", "Chrome · Work"]])
+    monkeypatch.setenv("FAKE_JARS", json.dumps({
+        "/p/Default": [["sessionKey", "home", 2e9]],
+        "/p/Work": [["sessionKey", "work", 2.1e9], ["lastActiveOrg", "o", 2e9]],
+        "chrome": [["sessionKey", "home", 2e9]],             # the default lookup: same session
+    }))
+    found = providers.discover_sessions("claude.ai", "sessionKey")
+    assert found == [{"cookie": "sessionKey=work; lastActiveOrg=o", "source": "Chrome · Work"},
+                     {"cookie": "sessionKey=home", "source": "Chrome · Personal"}]
 
 
 def test_next_month_reset():

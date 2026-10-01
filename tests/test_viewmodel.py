@@ -338,3 +338,116 @@ def test_history_state_orders_series_and_drops_empty():
 def test_demo_history_rows_shape():
     rows = demo_history_rows(time.time(), days=10)
     assert rows and all(len(r) == 5 and 0 <= r[2] <= 100 for r in rows)
+
+
+# ── more accounts ────────────────────────────────────────────────────────────
+
+from aiquotabar.accounts import AccountUsage  # noqa: E402
+from aiquotabar.viewmodel import history_label  # noqa: E402
+
+WORK, HOME = "claude@0a1b2c3d", "chatgpt@4e5f6a7b"
+
+
+def test_extra_accounts_get_their_own_cards():
+    st = build_panel_state(demo_snapshot("accounts", NOW))
+    cards = [(c["name"], c.get("account"), c.get("account_key")) for c in st["cards"]]
+    assert cards[:4] == [("Claude", "sam@home.example", None),        # main account, now labelled
+                         ("Claude", "sam@acme.example", WORK),
+                         ("ChatGPT", "sam@acme.example", None),
+                         ("ChatGPT", "sam@home.example", HOME)]
+    assert cards[4][1] is None                                        # single-account services: no label
+    work = st["cards"][1]
+    assert [m["key"] for m in work["meters"]] == [WORK, None]         # its own history / pace key
+    assert st["cards"][3]["meters"][0]["key"] == HOME + "_codex_tasks"
+    # The share card stays one tile per service and never shows an email.
+    assert [i["name"] for i in st["share"]["items"]] == ["Claude", "ChatGPT", "Cursor", "Copilot"]
+    assert "@" not in st["share"]["text"]
+    assert any(line and "sam@acme.example" in line for line in menu_lines(st))
+
+
+def test_single_account_cards_are_unchanged():
+    st = build_panel_state(demo_snapshot("default", NOW))
+    assert not any(c.get("account") or c.get("account_key") for c in st["cards"])
+    assert st["hero"]["account"] is None
+
+
+def test_extra_account_states():
+    s = demo_snapshot("accounts", NOW)
+    s.accounts = []                                                   # added, not fetched yet
+    st = build_panel_state(s)
+    assert [c["state"] for c in st["cards"] if c.get("account_key")] == ["loading", "loading"]
+    s.accounts = [AccountUsage(WORK, "claude", "sam@acme.example",
+                               error={"kind": "auth", "message": "403 session expired"}),
+                  AccountUsage(HOME, "chatgpt", "sam@home.example", source="codex",
+                               error={"kind": "auth", "message": "Codex sign-in expired"})]
+    st = build_panel_state(s)
+    errs = [c["error"] for c in st["cards"] if c.get("account_key")]
+    assert [e["title"] for e in errs] == ["Signed out", "Codex sign-in expired"]
+    assert all(e["action"]["id"] == "find_accounts" for e in errs)   # re-scan, not main re-detect
+    # Disabling a service hides its extra accounts too.
+    s.config["disabled_providers"] = ["claude"]
+    assert not any(c["id"] == "claude" for c in build_panel_state(s)["cards"])
+
+
+def test_stale_extra_account_keeps_numbers():
+    s = demo_snapshot("accounts", NOW)
+    s.accounts[0].error = {"kind": "network", "message": "timed out"}
+    card = next(c for c in build_panel_state(s)["cards"] if c.get("account_key") == WORK)
+    assert card["state"] == "ok" and card["stale"]
+
+
+def test_menu_bar_can_show_extra_accounts():
+    s = demo_snapshot("accounts", NOW)
+    assert all(seg["account"] is None for seg in bar_segments(s))    # auto: main accounts only
+    cfg = s.config
+    assert apply_setting(cfg, "bar_providers", [HOME, "Claude", WORK])
+    assert cfg["bar_providers"] == ["Claude", WORK, HOME]             # canonical order
+    segs = bar_segments(s)
+    assert [(g["id"], g["account"], g["tag"], g["pct"]) for g in segs] == [
+        ("claude", None, None, 78), ("claude", WORK, "acme", 12), ("chatgpt", HOME, "home", 35)]
+    assert not apply_setting(cfg, "bar_providers", ["claude@ffffffff"])   # unknown account
+    assert not apply_setting(cfg, "bar_providers", ["Claude", 3])
+
+
+def test_settings_lists_extra_accounts():
+    s = demo_snapshot("accounts", NOW)
+    s.config["ignored_accounts"] = ["claude@99999999"]
+    st = build_settings_state(s.config, snap=s, tcc_app="/Library/Frameworks/Python.framework/Python.app")
+    by = {a["id"]: a for a in st["accounts"]}
+    assert by["claude"]["multi"] and by["claude"]["hidden"] == 1
+    assert by["claude"]["detail"] == "sam@home.example · browser session"
+    assert by["claude"]["extras"] == [{"key": WORK, "label": "sam@acme.example",
+                                       "status": "on", "detail": "Chrome · Work"}]
+    assert by["chatgpt"]["extras"][0]["detail"] == "Codex CLI"
+    assert "multi" not in by["cursor"]
+    choices = [(p["name"], p["value"], p["account"]) for p in st["menubar"]["providers"]]
+    assert ("Claude · sam@acme.example", WORK, True) in choices
+    assert st["tcc_app"].endswith("Python.app") and st["general"]["classic_menu"] is False
+
+
+def test_settings_chatgpt_via_codex_only():
+    pd = ProviderData("ChatGPT", spent=5.0, limit=100.0, source="codex", account_label="me@lab.org")
+    pd._rows = [row("Codex Tasks", 5, 3600, 5 * H)]
+    st = build_settings_state({}, snap=snap(providers=[pd]))
+    chat = next(a for a in st["accounts"] if a["id"] == "chatgpt")
+    assert chat["status"] == "on" and chat["detail"] == "me@lab.org · Codex CLI"
+    st = build_settings_state({}, snap=snap())
+    chat = next(a for a in st["accounts"] if a["id"] == "chatgpt")
+    assert chat["status"] == "missing" and "Codex CLI" in chat["detail"]
+
+
+def test_classic_menu_setting():
+    cfg = {}
+    assert apply_setting(cfg, "classic_menu", True) and cfg["classic_menu"] is True
+    assert not apply_setting(cfg, "classic_menu", "yes")
+
+
+def test_history_labels_for_extra_accounts():
+    labels = {WORK: "sam@acme.example"}
+    assert history_label(WORK, labels) == "Claude (sam@acme.example) · session"
+    assert history_label(HOME + "_codex_tasks") == "ChatGPT (other account) · codex tasks"
+    assert history_label("claude") == "Claude · session"
+    st = build_history_state([("2026-09-30", WORK, 40, 20, 0)], {WORK: [(NOW - 60, 10), (NOW, 12)]},
+                             NOW, labels)
+    assert st["series"][0]["provider"] == "claude" and st["series"][0]["color"] == "#D4704A"
+    assert st["trends"][0]["label"] == "Claude (sam@acme.example) · session"

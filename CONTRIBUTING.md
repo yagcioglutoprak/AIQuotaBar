@@ -28,6 +28,7 @@ The web UI tests run the real panel in headless Chromium. They're skipped unless
 | File | What it does |
 |---|---|
 | `providers.py` | Fetchers for each service → `UsageData` / `ProviderData`. Browser cookie detection. |
+| `accounts.py` | Extra Claude / ChatGPT accounts: finding them, and how they're stored. |
 | `viewmodel.py` | Pure Python: turns app state into the JSON the UI renders. Settings allow-list. |
 | `web/` | The panel, settings, history and share card (HTML/CSS/JS, no build step, no remote assets). |
 | `webview.py`, `ui.py` | The macOS shell: WKWebView host, menu bar title, fetch loop, alerts. |

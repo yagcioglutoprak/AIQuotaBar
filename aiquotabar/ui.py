@@ -7,6 +7,7 @@ module owns side effects — network, config, notifications, windows.
 
 import atexit
 import base64
+import copy
 import json
 import os
 import subprocess
@@ -21,6 +22,11 @@ import rumps
 
 from aiquotabar import __version__, theme
 from aiquotabar import webview
+from aiquotabar.accounts import (
+    AccountUsage, CONFIG_KEY as ACCOUNTS_KEY, IGNORED_KEY, MULTI_PROVIDERS, PRIMARY_KEYS,
+    account_labels, codex_is_extra, extra_accounts, find_chatgpt_accounts,
+    find_claude_accounts, remove_account, unhide,
+)
 from aiquotabar.config import (
     log, LOG_FILE, load_config, save_config, notif_enabled, thresholds,
     REFRESH_INTERVALS, DEFAULT_REFRESH, PACING_ALERT_MINUTES, UPDATE_CHECK_INTERVAL,
@@ -30,7 +36,8 @@ from aiquotabar.providers import (
     PROVIDER_REGISTRY, COOKIE_PROVIDERS, CurlHTTPError,
     _auto_detect_cookies, _auto_detect_chatgpt_cookies,
     _auto_detect_copilot_cookies, _auto_detect_cursor_cookies,
-    _BROWSER_COOKIE3_OK,
+    _BROWSER_COOKIE3_OK, chatgpt_identity, claude_orgs, discover_sessions,
+    fetch_chatgpt_codex, fetch_chatgpt_with_fallback, read_codex_auth,
 )
 from aiquotabar.history import (
     _load_history, _save_history, _append_history, _calc_eta_minutes,
@@ -60,6 +67,9 @@ DETECTORS = {
 REDETECT_EVERY = 30 * 60      # retry browser detection for missing / signed-out providers
 OPEN_URL_HOSTS = {"claude.ai", "chatgpt.com", "cursor.com", "github.com", "x.com", "twitter.com"}
 LAUNCH_AGENT = os.path.expanduser("~/Library/LaunchAgents/com.claudebar.plist")
+FULL_DISK_ACCESS_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+SESSION_COOKIES = {"claude": ("claude.ai", "sessionKey"),
+                   "chatgpt": ("chatgpt.com", "__Secure-next-auth.session-token")}
 
 
 # ── status bar icons ─────────────────────────────────────────────────────────
@@ -200,6 +210,28 @@ def _open(url: str):
     subprocess.Popen(["open", url])
 
 
+def _tcc_app_path() -> str:
+    """What needs Full Disk Access for Safari's cookies to be readable.
+
+    macOS checks the app the interpreter runs as (Python.app inside the
+    Python framework for python.org and Homebrew builds), not the venv's
+    python3 symlink the LaunchAgent names, so granting the symlink does nothing.
+    """
+    try:
+        from Foundation import NSBundle
+        path = NSBundle.mainBundle().bundlePath()
+        if isinstance(path, str) and path.endswith(".app"):
+            return path
+    except Exception:
+        pass
+    return os.path.realpath(sys.executable)
+
+
+def _is_auth_error(message: str | None) -> bool:
+    msg = (message or "").lower()
+    return any(s in msg for s in ("401", "403", "not logged in", "expired", "unauthorized"))
+
+
 def _sentence(s: str) -> str:
     return s[:1].upper() + s[1:] if s else s
 
@@ -226,6 +258,11 @@ class ClaudeBar(rumps.App):
         self._week_hits: dict = {}
         self._last_updated: float | None = None
         self._history = {} if demo else _load_history()
+        self._accounts: list[AccountUsage] = []          # extra Claude / ChatGPT accounts
+        self._claude_label: str | None = None
+        self._claude_label_org: str | None = None
+        self._toasts: list[tuple] = []                   # (web host, text) for the main thread
+        self._tcc_app = _tcc_app_path()
 
         # -- alert bookkeeping --
         self._warned_pcts: set[str] = set()
@@ -306,6 +343,8 @@ class ClaudeBar(rumps.App):
                 log.exception("fallback menu failed")
 
     def _startup_ui(self):
+        log.info("AIQuotaBar %s · python %s · Full Disk Access (for Safari) goes to: %s",
+                 __version__, sys.executable, self._tcc_app)
         try:
             webview.install_edit_menu()
         except Exception:
@@ -346,13 +385,19 @@ class ClaudeBar(rumps.App):
     def _hook_status_button(self):
         """Left click toggles the panel; right click shows the small context menu."""
         self._clicker = webview.status_click_target(
-            left=lambda: self._panel.toggle(), right=self._show_context_menu)
+            left=self._on_left_click, right=self._show_context_menu)
         self._nsapp.nsstatusitem.setMenu_(None)
         btn = self._status_button()
         btn.setTarget_(self._clicker)
         btn.setAction_(b"clicked:")
         btn.sendActionOn_(4 | 16)    # left mouse up | right mouse up
         log.info("status button hooked to the web panel")
+
+    def _on_left_click(self):
+        if self._panel and not self.config.get("classic_menu"):
+            self._panel.toggle()
+        else:
+            self._show_context_menu()
 
     def _show_context_menu(self):
         if self._panel:
@@ -378,6 +423,8 @@ class ClaudeBar(rumps.App):
                 updated_at=self._last_updated,
                 fetching=self._fetching,
                 detecting=set(self._detecting),
+                accounts=list(self._accounts),
+                claude_label=self._claude_label,
             )
 
     def _post_update(self):
@@ -394,10 +441,16 @@ class ClaudeBar(rumps.App):
     def _flush_ui_once(self):
         with self._state_lock:
             dirty, self._ui_dirty = self._ui_dirty, False
+            toasts, self._toasts = self._toasts, []
         if dirty:
             self._apply()
         elif self.config.get("bar_show_reset") and time.time() - self._last_title_tick > 30:
             self._update_title(self._snapshot())    # keep the countdown current
+        if toasts:
+            live = [w.host for w in self._windows.values()] + ([self._panel.host] if self._panel else [])
+            for host, text in toasts:
+                if any(host is h for h in live):
+                    host.toast(text)
         panel = self._panel
         if panel and panel.show_when_ready and not panel.host.ready \
                 and time.time() - panel.host.created_at > 5:
@@ -426,7 +479,7 @@ class ClaudeBar(rumps.App):
     def _settings_state(self, snap: Snapshot, view: str = "settings", tab: str | None = None) -> dict:
         st = build_settings_state(self.config, snap=snap, launch_at_login=_is_login_item(),
                                   widget_installed=_is_widget_installed(),
-                                  version=__version__, tab=tab)
+                                  version=__version__, tab=tab, tcc_app=self._tcc_app)
         st["view"] = view
         return st
 
@@ -477,8 +530,9 @@ class ClaudeBar(rumps.App):
             prev = None
             for i, seg in enumerate(segments):
                 p = theme.PROVIDERS[seg["id"]]
-                same = seg["id"] == prev     # e.g. Claude session + weekly
-                prev = seg["id"]
+                ident = (seg["id"], seg.get("account"))
+                same = ident == prev         # e.g. Claude session + weekly
+                prev = ident
                 if i:
                     out.appendAttributedString_(text("  " if same else "   "))
                 if not same:
@@ -513,7 +567,7 @@ class ClaudeBar(rumps.App):
 
     def _rebuild_menu(self, snap: Snapshot | None = None):
         items: list = []
-        if self._web_ok:
+        if self._web_ok and not self.config.get("classic_menu"):
             items += [
                 rumps.MenuItem("Show Usage", callback=lambda _: self._open_panel()),
                 rumps.MenuItem("Refresh Now", callback=lambda _: self._schedule_fetch(), key="r"),
@@ -531,6 +585,13 @@ class ClaudeBar(rumps.App):
             if not self._web_ok and self._panel is None:
                 items.append(self._info_item("Install pyobjc-framework-WebKit for the full panel"))
                 items.append(None)
+            if self._web_ok:
+                # The classic menu by choice (Settings → General): windows still work.
+                items += [
+                    rumps.MenuItem("Usage History…", callback=lambda _: self._open_window("history")),
+                    rumps.MenuItem("Settings…", callback=lambda _: self._open_window("settings"), key=","),
+                    None,
+                ]
             items += [
                 rumps.MenuItem("Refresh Now", callback=lambda _: self._schedule_fetch()),
                 rumps.MenuItem("Auto-detect from Browser", callback=lambda _: self._detect_async(list(DETECTORS))),
@@ -610,7 +671,8 @@ class ClaudeBar(rumps.App):
     def _push_window(self, win: "webview.Window", tab: str | None = None):
         snap = self._snapshot()
         if win.view == "history":
-            win.host.push(build_history_state(self._history_rows(), dict(snap.trends)))
+            win.host.push(build_history_state(self._history_rows(), dict(snap.trends),
+                                              labels=account_labels(self.config)))
         else:
             win.host.push(self._settings_state(snap, win.view, tab))
 
@@ -724,6 +786,7 @@ class ClaudeBar(rumps.App):
                 else:
                     name = theme.PROVIDERS[pid]["name"]
                     self._provider_data = [p for p in self._provider_data if p.name != name]
+                self._accounts = [u for u in self._accounts if u.provider != pid]
             self._post_update()
 
     def _act_enable(self, host, msg):
@@ -743,6 +806,47 @@ class ClaudeBar(rumps.App):
     def _act_set_cookie(self, host, msg):
         if msg.get("provider") == "claude" and isinstance(msg.get("value"), str):
             self._set_cookie(msg["value"])
+
+    def _act_find_accounts(self, host, msg):
+        if msg.get("provider") in MULTI_PROVIDERS:
+            self._find_accounts_async(msg["provider"], host)
+
+    def _act_add_account_cookie(self, host, msg):
+        """A pasted Claude cookie, added next to the main account instead of replacing it."""
+        value = msg.get("value")
+        if msg.get("provider") != "claude" or not isinstance(value, str):
+            return
+        value = value.strip()
+        if "=" not in value and len(value) < 20:
+            return
+        self._find_accounts_async("claude", host, sessions=[{"cookie": value, "source": "Pasted cookie"}])
+
+    def _act_remove_account(self, host, msg):
+        key = msg.get("key")
+        if not isinstance(key, str):
+            return
+        with self._config_lock:
+            removed = remove_account(self.config, key)
+            if removed:
+                self._save()
+        if removed:
+            with self._state_lock:
+                self._accounts = [u for u in self._accounts if u.key != key]
+            self._post_update()
+
+    def _act_unhide_accounts(self, host, msg):
+        pid = msg.get("provider")
+        if pid in MULTI_PROVIDERS:
+            with self._config_lock:
+                unhide(self.config, pid)
+                self._save()
+            self._find_accounts_async(pid, host)
+
+    def _act_reveal_python(self, host, msg):
+        subprocess.Popen(["open", "-R", self._tcc_app])
+
+    def _act_open_privacy(self, host, msg):
+        subprocess.Popen(["open", FULL_DISK_ACCESS_PANE])
 
     def _act_set_api_key(self, host, msg):
         key, value = msg.get("key"), msg.get("value")
@@ -897,6 +1001,8 @@ class ClaudeBar(rumps.App):
                         disabled.remove(pid)
                     self._save()
                 found.append(pid)
+            elif pid == "chatgpt" and not codex_is_extra(self.config) and read_codex_auth():
+                found.append(pid)       # no browser session, but Codex CLI is signed in
             elif manual:
                 name = theme.PROVIDERS[pid]["name"]
                 _notify("AIQuotaBar", f"No {name} session found",
@@ -909,6 +1015,186 @@ class ClaudeBar(rumps.App):
                 self._auth_fail_count = 0
                 self._warned_pcts.clear()
             self._schedule_fetch()
+
+    # ── more accounts ────────────────────────────────────────────────────────
+
+    def _find_accounts_async(self, pid: str, host=None, sessions: list | None = None):
+        """Look for every account of `pid` (all browsers and profiles, Codex CLI)."""
+        if self._demo:
+            if host is not None:
+                with self._state_lock:
+                    self._toasts.append((host, "Demo mode: nothing is saved"))
+                self._post_update()
+            return
+        with self._state_lock:
+            if pid in self._detecting:
+                return
+            self._detecting.add(pid)
+        self._post_update()
+        threading.Thread(target=self._find_accounts_worker, args=(pid, host, sessions),
+                         daemon=True).start()
+
+    def _find_accounts_worker(self, pid: str, host, sessions: list | None):
+        summary = None
+        try:
+            summary = self._discover(pid, add_new=True, sessions=sessions)
+        except Exception:
+            log.exception("account discovery failed for %s", pid)
+        finally:
+            self._detect_attempts["accounts:" + pid] = time.time()
+            with self._state_lock:
+                self._detecting.discard(pid)
+            self._post_update()
+        name = theme.PROVIDERS[pid]["name"]
+        if summary is None:
+            if host is not None:
+                with self._state_lock:
+                    self._toasts.append((host, f"Couldn't look for {name} accounts (see the log)"))
+                self._post_update()
+            return
+        n = summary["added"]
+        if n:
+            text = f"Added {n} {name} account{'s' if n > 1 else ''}"
+        elif summary["primary"]:
+            text = f"Connected your {name} account"
+        elif summary["refreshed"]:
+            text = f"Reconnected your {name} accounts"
+        else:
+            text = f"No new {name} accounts found"
+            where = "a different browser or browser profile"
+            if pid == "chatgpt":
+                where += ", or to Codex CLI"
+            _notify("AIQuotaBar", text, f"Sign in to the other account in {where}, then try again.")
+        if host is not None:
+            with self._state_lock:
+                self._toasts.append((host, text))
+            self._post_update()
+
+    def _discover(self, pid: str, add_new: bool, sessions: list | None = None) -> dict:
+        """Scan for `pid`'s accounts and merge them into the config.
+
+        Runs off the main thread (network). Works on a copy of the account
+        keys, then merges, so an account removed meanwhile stays removed.
+        `add_new=False` only refreshes the cookies of accounts already known.
+        """
+        primary_key = PRIMARY_KEYS[pid]
+        with self._config_lock:
+            work = copy.deepcopy({k: self.config[k] for k in (primary_key, ACCOUNTS_KEY, IGNORED_KEY)
+                                  if k in self.config})
+        before_keys = {a["key"] for a in extra_accounts(work)}
+        before_primary = work.get(primary_key)
+        if sessions is None:
+            sessions = discover_sessions(*SESSION_COOKIES[pid]) if _BROWSER_COOKIE3_OK else []
+        if pid == "claude":
+            summary = find_claude_accounts(work, sessions, claude_orgs)
+        else:
+            summary = find_chatgpt_accounts(work, sessions, read_codex_auth(), chatgpt_identity)
+        found = {a["key"]: a for a in extra_accounts(work)}
+        with self._config_lock:
+            ignored = set(self.config.get(IGNORED_KEY) or [])
+            current = {a["key"]: a for a in extra_accounts(self.config)}
+            for key, a in found.items():
+                if key in current:
+                    current[key].update({k: a[k] for k in ("cookie", "source", "label") if k in a})
+                elif key not in before_keys and key not in ignored and add_new:
+                    self.config.setdefault(ACCOUNTS_KEY, []).append(a)
+            if not add_new:
+                summary["added"] = 0
+            primary_changed = work.get(primary_key) != before_primary
+            if primary_changed:
+                self.config[primary_key] = work[primary_key]
+                disabled = self.config.get("disabled_providers", [])
+                if pid in disabled and summary["primary"]:
+                    disabled.remove(pid)
+            self._save()
+        if primary_changed and pid == "claude":
+            self._auth_fail_count = 0
+            self._warned_pcts.clear()
+        if primary_changed or summary["added"] or summary["refreshed"]:
+            self._schedule_fetch()
+        return summary
+
+    def _fetch_account(self, a: dict) -> AccountUsage:
+        """Fetch one extra account. Never raises."""
+        try:
+            return self._fetch_account_once(a)
+        except Exception as e:
+            log.exception("fetching extra account %s failed", a.get("key"))
+            return AccountUsage(key=a["key"], provider=a["provider"], label=a.get("label") or "",
+                                source=a.get("source", ""),
+                                error={"kind": "network", "message": str(e)[:120]})
+
+    def _fetch_account_once(self, a: dict) -> AccountUsage:
+        u = AccountUsage(key=a["key"], provider=a["provider"], label=a.get("label") or "",
+                         source=a.get("source", ""))
+        if a["provider"] == "claude":
+            try:
+                u.claude = parse_usage(fetch_raw(a.get("cookie") or "", org_id=a.get("org_id")))
+            except CurlHTTPError as e:
+                code = getattr(getattr(e, "response", None), "status_code", 0) or 0
+                u.error = {"kind": "auth" if code in (401, 403) else "network",
+                           "message": f"{code} session expired" if code in (401, 403) else f"HTTP {code}"}
+            except ValueError as e:
+                u.error = {"kind": "auth", "message": str(e)[:120]}
+            except Exception as e:
+                u.error = {"kind": "network", "message": str(e)[:120]}
+            return u
+        if a.get("source") == "codex":
+            auth = read_codex_auth()
+            pd = fetch_chatgpt_codex(auth)
+            if not pd.error and a.get("account_id") and pd.account_id \
+                    and pd.account_id != a["account_id"]:
+                pd.error = "Codex CLI is now signed in to another account"
+        else:
+            pd = PROVIDER_REGISTRY["chatgpt_cookies"][1](a.get("cookie") or "")
+        if pd.error:
+            u.error = {"kind": "auth" if _is_auth_error(pd.error) else "network", "message": pd.error}
+        else:
+            u.data = pd
+        return u
+
+    def _fetch_extra_accounts(self):
+        """Fetch every extra account in parallel; keep the last numbers on a failure."""
+        disabled = set(self.config.get("disabled_providers", []))
+        with self._config_lock:
+            accts = [dict(a) for a in extra_accounts(self.config) if a["provider"] not in disabled]
+        prev = {u.key: u for u in self._accounts}
+        results: list[AccountUsage] = []
+        if accts:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(8, len(accts))) as pool:
+                for u in pool.map(self._fetch_account, accts):
+                    old = prev.get(u.key)
+                    if u.error and old is not None and (old.claude or old.data):
+                        u.claude, u.data = old.claude, old.data     # shown as stale
+                    results.append(u)
+        with self._state_lock:
+            self._accounts = results
+        # A signed-out extra account: look for its fresher session now and then.
+        for pid in MULTI_PROVIDERS:
+            if any(u.provider == pid and u.error and u.error.get("kind") == "auth" for u in results) \
+                    and self._should_detect("accounts:" + pid):
+                self._detect_attempts["accounts:" + pid] = time.time()
+                try:
+                    summary = self._discover(pid, add_new=False)
+                except Exception:
+                    log.exception("account refresh failed for %s", pid)
+                    continue
+                if summary["refreshed"]:
+                    log.info("%s: refreshed %d signed-out account(s)", pid, summary["refreshed"])
+
+    def _update_claude_label(self, cookie: str, org_id: str | None):
+        """Name of the main Claude account (its organization), once per org."""
+        if not org_id or org_id == self._claude_label_org:
+            return
+        self._claude_label_org = org_id
+        try:
+            label = next((o["label"] for o in claude_orgs(cookie) if o["uuid"] == org_id), None)
+        except Exception:
+            log.debug("claude org label lookup failed", exc_info=True)
+            label = None
+        with self._state_lock:
+            self._claude_label = label
 
     # ── fetch ────────────────────────────────────────────────────────────────
 
@@ -931,9 +1217,11 @@ class ClaudeBar(rumps.App):
             else:
                 self._fetch_claude()
                 self._fetch_providers()
+                self._fetch_extra_accounts()
                 self._cc_stats = fetch_claude_code_stats()
                 self._record_history()
                 self._check_provider_warnings(self._provider_data)
+                self._check_account_warnings()
                 self._check_pacing_alerts()
             self._last_updated = time.time()
             if not self._demo:
@@ -958,6 +1246,7 @@ class ClaudeBar(rumps.App):
             self._last_data, self._claude_error = snap.claude, snap.claude_error
             self._provider_data, self._cc_stats = snap.providers, snap.cc_stats
             self._history, self._trends, self._week_hits = snap.history, snap.trends, snap.week_hits
+            self._accounts, self._claude_label = snap.accounts, snap.claude_label
 
     def _fetch_claude(self):
         if "claude" in self.config.get("disabled_providers", []):
@@ -1012,6 +1301,7 @@ class ClaudeBar(rumps.App):
             self._last_data = data
             self._claude_error = None
         self._auth_fail_count = 0
+        self._update_claude_label(cookie, raw.get("org_id") if isinstance(raw, dict) else None)
         self._check_warnings(data)
 
     def _on_claude_auth_failure(self, code: int, message: str = ""):
@@ -1063,10 +1353,17 @@ class ClaudeBar(rumps.App):
 
         with self._config_lock:
             keys = {k: self.config.get(k) for k in PROVIDER_REGISTRY}
+            # Codex CLI's sign-in backs up the main ChatGPT account, unless it
+            # is tracked as an account of its own.
+            codex_ok = "chatgpt" not in disabled and not codex_is_extra(self.config)
+        codex = read_codex_auth() if codex_ok else None
         tasks = []
         for cfg_key, (name, fn) in PROVIDER_REGISTRY.items():
             pid = theme.NAME_TO_ID.get(name)
-            if keys.get(cfg_key) and pid not in disabled:
+            if pid == "chatgpt" and pid not in disabled and (keys.get(cfg_key) or codex):
+                tasks.append((cfg_key, lambda k, fn=fn: fetch_chatgpt_with_fallback(k, codex, fn),
+                              keys.get(cfg_key)))
+            elif keys.get(cfg_key) and pid not in disabled:
                 tasks.append((cfg_key, fn, keys[cfg_key]))
         results: list[ProviderData] = []
         if tasks:
@@ -1110,6 +1407,13 @@ class ClaudeBar(rumps.App):
                 pts += [(history_key(pid, r.label), r.pct) for r in rows]
             elif pd.pct is not None:
                 pts.append((pid, pd.pct))
+        for u in self._accounts:
+            if u.error:
+                continue
+            if u.claude and u.claude.session:
+                pts.append((u.key, u.claude.session.pct))
+            elif u.data:
+                pts += [(history_key(u.key, r.label), r.pct) for r in getattr(u.data, "_rows", [])]
         return pts
 
     def _record_history(self):
@@ -1192,6 +1496,29 @@ class ClaudeBar(rumps.App):
             self._threshold_alerts(rows, pname, notif_enabled(self.config, warn_key),
                                    bool(reset_key) and notif_enabled(self.config, reset_key))
 
+    def _account_title(self, u: AccountUsage) -> str:
+        return f"{theme.PROVIDERS[u.provider]['name']} ({u.label})" if u.label \
+            else theme.PROVIDERS[u.provider]["name"]
+
+    def _check_account_warnings(self):
+        """Usage / reset alerts for extra accounts, under their own alert keys."""
+        for u in list(self._accounts):
+            if u.error:
+                continue        # stale numbers: no fresh crossing to report
+            if u.claude:
+                d = u.claude
+                rows = [(r, f"{u.key}_{k}") for r, k in (
+                    (d.session, "session"), (d.weekly_all, "weekly_all"),
+                    (d.weekly_sonnet, "weekly_sonnet"), (d.weekly_opus, "weekly_opus")) if r]
+                self._threshold_alerts(rows, self._account_title(u),
+                                       notif_enabled(self.config, "claude_warning"),
+                                       notif_enabled(self.config, "claude_reset"))
+            elif u.data:
+                rows = [(r, f"{u.key}_{r.label}") for r in getattr(u.data, "_rows", [])]
+                self._threshold_alerts(rows, self._account_title(u),
+                                       notif_enabled(self.config, "chatgpt_warning"),
+                                       notif_enabled(self.config, "chatgpt_reset"))
+
     def _check_pacing_alerts(self):
         """Predictive alert when the burn rate says you'll hit a limit before it resets."""
         checks = []
@@ -1207,6 +1534,15 @@ class ClaudeBar(rumps.App):
                            for r in rows]
             else:
                 checks.append(("copilot", "copilot_pacing", "Copilot", pd.resets_at))
+        for u in self._accounts:
+            if u.error:
+                continue
+            who = self._account_title(u)
+            if u.claude and u.claude.session:
+                checks.append((u.key, "claude_pacing", f"{who} session", u.claude.session.resets_at))
+            elif u.data:
+                checks += [(history_key(u.key, r.label), "chatgpt_pacing", f"{who} {r.label}",
+                            r.resets_at) for r in getattr(u.data, "_rows", [])]
         for hkey, nkey, label, resets_at in checks:
             if not notif_enabled(self.config, nkey):
                 continue

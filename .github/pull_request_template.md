@@ -8,6 +8,7 @@ Closes #
 
 - [ ] `python3 -m pytest` passes
 - [ ] Ran the app with `python3 claude_bar.py --demo` (UI changes)
+- [ ] Panel / status item changes: a left click opens the panel while another app is in full screen (green button)
 - [ ] Ran the app with my real accounts (provider changes). Say which services:
 
 <!-- For UI changes, add a before/after screenshot (hide account details). -->

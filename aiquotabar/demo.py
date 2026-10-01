@@ -12,6 +12,7 @@ import random
 import time
 from datetime import datetime, timedelta, timezone
 
+from aiquotabar.accounts import AccountUsage
 from aiquotabar.providers import LimitRow, ProviderData, UsageData, fmt_reset_ts
 from aiquotabar.viewmodel import Snapshot
 
@@ -85,6 +86,8 @@ def demo_snapshot(variant: str = "default", now: float | None = None) -> Snapsho
     providers = [chatgpt, cursor, copilot]
     claude_error = None
     detecting: set = set()
+    accounts: list = []
+    claude_label = None
 
     if variant == "states":
         # One healthy card, one near the limit, one signed out, one loading.
@@ -96,6 +99,31 @@ def demo_snapshot(variant: str = "default", now: float | None = None) -> Snapsho
         cursor = ProviderData("Cursor", error="403 Client Error: Forbidden for url")
         providers = [chatgpt, cursor]
         detecting = {"copilot"}
+    elif variant == "accounts":
+        # A second Claude account (a work Team plan) and Codex CLI signed in
+        # to another ChatGPT account. Labels are made up.
+        cfg["extra_accounts"] = [
+            {"key": "claude@0a1b2c3d", "provider": "claude", "label": "sam@acme.example",
+             "cookie": "demo", "org_id": "demo-org", "source": "Chrome · Work"},
+            {"key": "chatgpt@4e5f6a7b", "provider": "chatgpt", "label": "sam@home.example",
+             "account_id": "demo-acct", "source": "codex"},
+        ]
+        claude_label = "sam@home.example"
+        work = UsageData(
+            session=_row("Current Session", 12, 4 * H + 5 * 60, 5 * H, now),
+            weekly_all=_row("All Models", 27, 5 * D + 2 * H, 7 * D, now),
+        )
+        home_gpt = ProviderData("ChatGPT", spent=35.0, limit=100.0, currency="", source="codex",
+                                account_label="sam@home.example")
+        home_gpt._rows = [_row("Codex Tasks", 35, 1 * H + 10 * 60, 5 * H, now),
+                          _row("Codex Tasks Weekly", 18, 4 * D, 7 * D, now)]
+        chatgpt.account_label = "sam@acme.example"
+        accounts = [
+            AccountUsage("claude@0a1b2c3d", "claude", "sam@acme.example", claude=work,
+                         source="Chrome · Work"),
+            AccountUsage("chatgpt@4e5f6a7b", "chatgpt", "sam@home.example", data=home_gpt,
+                         source="codex"),
+        ]
     elif variant == "empty":
         cfg = {"refresh_interval": 300}
         claude, providers = None, []
@@ -126,6 +154,8 @@ def demo_snapshot(variant: str = "default", now: float | None = None) -> Snapsho
         updated_at=now - 40,
         fetching=False,
         detecting=detecting,
+        accounts=accounts,
+        claude_label=claude_label,
         now=now,
     )
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import time
 
 from aiquotabar.config import log
@@ -18,6 +19,34 @@ from aiquotabar.viewmodel import WEB_DIR, boot_assets
 
 _classes: dict = {}
 _boot_cache: dict = {}
+
+# The panel has to open over a full-screen app (its own Space) as reliably as
+# a normal menu. Same recipe as well-tested menu bar panels (Maccy et al.):
+#  - non-activating: it becomes key (Esc, click-away) WITHOUT activating the
+#    app. Activating would switch to the Space the app's windows live on — off
+#    the full-screen app — and the panel would open there, out of sight.
+#  - status-bar level, so it sits above the full-screen window.
+#  - moves to the active Space and is allowed on full-screen Spaces.
+NONACTIVATING_PANEL = 1 << 7          # NSWindowStyleMaskNonactivatingPanel
+STATUS_WINDOW_LEVEL = 25              # NSStatusWindowLevel
+SPACE_MOVE_TO_ACTIVE = 1 << 1         # NSWindowCollectionBehaviorMoveToActiveSpace
+SPACE_STATIONARY = 1 << 4             # ...Stationary (not moved by Mission Control)
+SPACE_IGNORES_CYCLE = 1 << 6          # ...IgnoresCycle (not in ⌘`)
+SPACE_FULLSCREEN_AUX = 1 << 8         # ...FullScreenAuxiliary
+SPACE_AUXILIARY = 1 << 17             # ...Auxiliary (macOS 13+)
+
+
+def panel_collection_behavior(mac_version: str | None = None) -> int:
+    """Spaces behaviour for the panel. Never combine MoveToActiveSpace with
+    CanJoinAllSpaces: AppKit raises on that pair."""
+    behavior = SPACE_MOVE_TO_ACTIVE | SPACE_STATIONARY | SPACE_IGNORES_CYCLE | SPACE_FULLSCREEN_AUX
+    ver = platform.mac_ver()[0] if mac_version is None else mac_version
+    try:
+        if int((ver or "0").split(".")[0]) >= 13:
+            behavior |= SPACE_AUXILIARY
+    except ValueError:
+        pass
+    return behavior
 
 
 def available() -> bool:
@@ -75,6 +104,26 @@ def _define_classes() -> bool:
             if cb:
                 cb()
 
+    try:
+        nav_protocols = [objc.protocolNamed("WKNavigationDelegate")]
+    except Exception:
+        nav_protocols = []
+
+    class AIQNavigationDelegate(NSObject, protocols=nav_protocols):
+        """Notices when WebKit's content process dies (memory pressure, crash).
+
+        The view then goes blank while the page still counts as loaded; a
+        click on the menu bar icon would show an empty panel, or nothing.
+        """
+
+        def webViewWebContentProcessDidTerminate_(self, webview):
+            cb = getattr(self, "py_terminated", None)
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    log.exception("web content reload failed")
+
     class AIQWindowDelegate(NSObject):
         def windowWillClose_(self, notification):
             cb = getattr(self, "py_close", None)
@@ -100,7 +149,7 @@ def _define_classes() -> bool:
                     log.exception("status click handler failed")
 
     _classes.update(bridge=AIQScriptBridge, panel=AIQPanel, delegate=AIQWindowDelegate,
-                    click=AIQStatusClick)
+                    click=AIQStatusClick, nav=AIQNavigationDelegate)
     return True
 
 
@@ -127,6 +176,7 @@ class WebHost:
         self.ready = False
         self.created_at = time.time()
         self._pending: dict | None = None
+        self._last: dict | None = None
         self._on_message = on_message
 
         self.bridge = _classes["bridge"].alloc().init()
@@ -146,9 +196,24 @@ class WebHost:
         except Exception:
             log.debug("drawsBackground not supported", exc_info=True)
         wv.setAutoresizingMask_(18)   # width + height
-        index = NSURL.fileURLWithPath_(os.path.join(WEB_DIR, "index.html"))
-        wv.loadFileURL_allowingReadAccessToURL_(index, NSURL.fileURLWithPath_isDirectory_(WEB_DIR, True))
+        self._nav = _classes["nav"].alloc().init()
+        self._nav.py_terminated = self._content_died
+        wv.setNavigationDelegate_(self._nav)
         self.webview = wv
+        self._load()
+
+    def _load(self):
+        from Foundation import NSURL
+        index = NSURL.fileURLWithPath_(os.path.join(WEB_DIR, "index.html"))
+        self.webview.loadFileURL_allowingReadAccessToURL_(
+            index, NSURL.fileURLWithPath_isDirectory_(WEB_DIR, True))
+
+    def _content_died(self):
+        """Reload; the page reports `ready` again and gets the last state."""
+        log.warning("web content process for the %s view ended; reloading", self.view)
+        self.ready = False
+        self.created_at = time.time()
+        self._load()
 
     def _receive(self, body):
         try:
@@ -160,12 +225,15 @@ class WebHost:
         if msg["action"] == "ready":
             self.ready = True
             self.eval(_boot_js())
+            if self._pending is None and self._last is not None:
+                self._pending = self._last      # reloaded after the content process died
             if self._pending is not None:
                 self.push(self._pending)
         self._on_message(self, msg)
 
     def push(self, state: dict):
         """Render `state` (queued until the page reports ready)."""
+        self._last = state
         if not self.ready:
             self._pending = state
             return
@@ -188,6 +256,11 @@ class WebHost:
         except Exception:
             pass
         self.bridge.py_callback = None
+        self._nav.py_terminated = None
+        try:
+            self.webview.setNavigationDelegate_(None)
+        except Exception:
+            pass
 
 
 class Panel:
@@ -206,16 +279,21 @@ class Panel:
         self._last_dismiss = 0.0
         self.show_when_ready = False
 
+        # Borderless + non-activating (see NONACTIVATING_PANEL above).
         panel = _classes["panel"].alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, self.WIDTH, self._height), 0, NSBackingStoreBuffered, False)
-        panel.setLevel_(3)                      # floating
+            NSMakeRect(0, 0, self.WIDTH, self._height), NONACTIVATING_PANEL,
+            NSBackingStoreBuffered, False)
+        panel.setLevel_(STATUS_WINDOW_LEVEL)
         panel.setHasShadow_(True)
         panel.setOpaque_(False)
         panel.setBackgroundColor_(NSColor.clearColor())
         panel.setHidesOnDeactivate_(False)
         panel.setWorksWhenModal_(True)
-        # canJoinAllSpaces | fullScreenAuxiliary: open over full-screen apps too
-        panel.setCollectionBehavior_((1 << 0) | (1 << 8))
+        try:
+            panel.setCollectionBehavior_(panel_collection_behavior())
+        except Exception:
+            # An older macOS that rejects the Auxiliary bit.
+            panel.setCollectionBehavior_(panel_collection_behavior("12"))
         panel.py_dismiss = self.dismiss
 
         content = panel.contentView()
@@ -249,11 +327,13 @@ class Panel:
             self.show_when_ready = True
             return
         self.show_when_ready = False
-        from AppKit import NSAnimationContext, NSApplication
+        from AppKit import NSAnimationContext
         self._place()
         self.window.setAlphaValue_(0.0)
-        self.window.makeKeyAndOrderFront_(None)
-        NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+        # Front on the *current* Space (a full-screen app's too) and key for
+        # Esc / click-away, without activating the app — see NONACTIVATING_PANEL.
+        self.window.orderFrontRegardless()
+        self.window.makeKeyWindow()
         NSAnimationContext.currentContext().setDuration_(0.12)
         self.window.animator().setAlphaValue_(1.0)
         self.visible = True
@@ -292,12 +372,14 @@ class Panel:
             btn = self._status_button()
             screen_rect = btn.window().convertRectToScreen_(btn.frame())
             screen = btn.window().screen() or NSScreen.mainScreen()
-            vf = screen.visibleFrame()
+            vf, full = screen.visibleFrame(), screen.frame()
             height = min(self._height, vf.size.height - 16)
             x = screen_rect.origin.x + screen_rect.size.width / 2 - self.WIDTH / 2
             x = max(vf.origin.x + 6, min(x, vf.origin.x + vf.size.width - self.WIDTH - 6))
-            y = screen_rect.origin.y - height - 5
-            y = max(vf.origin.y + 6, y)
+            # In full screen the menu bar slides away again; if it already has,
+            # its button sits above the screen. Keep the panel on screen anyway.
+            top = min(screen_rect.origin.y - 5, full.origin.y + full.size.height)
+            y = max(vf.origin.y + 6, top - height)
             self.window.setFrame_display_(NSMakeRect(x, y, self.WIDTH, height), True)
             self.window.invalidateShadow()
         except Exception:

@@ -49,6 +49,7 @@ aiquotabar/
 ├── config.py     config + thresholds (~/.claude_bar_config.json), logging
 ├── theme.py      provider identity: names, brand colours, icons (single source)
 ├── providers.py  fetchers → UsageData / ProviderData; LimitRow has resets_at + window_secs
+├── accounts.py   extra Claude / ChatGPT accounts: discovery + config shape (pure Python)
 ├── history.py    burn rate (short-term JSON) + SQLite samples/daily stats + 24h trends
 ├── viewmodel.py  PURE PYTHON: app state (Snapshot) → JSON for the UI; settings allow-list
 ├── web/          index.html + app.css + app.js — panel, settings, history, welcome, share card
@@ -106,6 +107,18 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
   All notifications go through `_notify()` which swallows the exception silently.
 - **Cookies are cached** in `~/.claude_bar_config.json`. Auto-detect runs on first launch
   and on repeated 401/403 failures to silently refresh the session.
+- **More accounts are additive.** The main account keeps `cookie_str` / `chatgpt_cookies`, so the
+  menu bar, widget and alerts work unchanged; extra Claude / ChatGPT accounts live in
+  `extra_accounts` (keys like `claude@1a2b3c4d`, a hash of the provider's account id, also used as
+  history / alert key prefixes). They're found, not typed: every browser *profile*, every Claude
+  organization of a sign-in, Codex CLI. Auto menu bar mode shows main accounts only, and the share
+  card never includes extra accounts or emails.
+- **The panel is a non-activating NSPanel** at status-bar level that moves to the active Space and
+  may join full-screen Spaces. Never activate the app to show it: activation switches Spaces away
+  from a full-screen app and the panel opens out of sight (#32). Settings windows do activate.
+- **ChatGPT falls back to Codex CLI** (`~/.codex/auth.json`) when the browser session is missing or
+  stale. That file is read-only for us: refreshing its token would rotate Codex's refresh token
+  and sign Codex out.
 
 ## API behaviour (confirmed)
 

@@ -55,6 +55,11 @@ def ui(monkeypatch):
     def offline(*a, **k):
         raise ConnectionError("offline in tests")
     monkeypatch.setattr(mod, "fetch_raw", offline)
+    monkeypatch.setattr(mod, "claude_orgs", offline)
+    monkeypatch.setattr(mod, "chatgpt_identity", offline)
+    monkeypatch.setattr(mod, "discover_sessions", lambda *a: [])
+    monkeypatch.setattr(mod, "read_codex_auth", lambda: None)
+    monkeypatch.setattr(mod, "fetch_chatgpt_codex", lambda *a: offline())
     monkeypatch.setattr(mod, "_auto_detect_cookies", lambda: None)
     for pid in list(mod.DETECTORS):
         monkeypatch.setitem(mod.DETECTORS, pid, lambda: None)
@@ -358,3 +363,220 @@ def test_ui_failures_never_escape_timer_callbacks(ui, monkeypatch):
     monkeypatch.setattr(app, "_apply", boom)
     app._post_update()
     app._flush_ui(None)                                     # must not raise
+
+
+# ── issue #32: the panel over a full-screen app ──────────────────────────────
+
+def _panel_calls(method):
+    return [args for obj, m, args in fake_macos.CALLS if obj == "AIQPanel" and m == method]
+
+
+def test_panel_opens_over_full_screen_apps(ui, monkeypatch):
+    """Required check for #32: a left click on a full-screen Space shows the panel.
+
+    AppKit itself can't run here, so this pins down the configuration that
+    makes it work: a non-activating panel at status-bar level that moves to
+    the active Space and may join full-screen Spaces, shown without
+    activating the app (activation switches Spaces away from the full-screen
+    app). Verify by hand on a Mac before a release, too.
+    """
+    monkeypatch.setitem(fake_macos.RETURNS, "frame", lambda *a: fake_macos.Rect(0, 0, 1440, 900))
+    app = start(ui.ClaudeBar(demo=True))
+    (init,) = _panel_calls("initWithContentRect_styleMask_backing_defer_")
+    assert init[1] & ui.webview.NONACTIVATING_PANEL
+    assert _panel_calls("setLevel_")[-1] == (ui.webview.STATUS_WINDOW_LEVEL,)
+    behavior = _panel_calls("setCollectionBehavior_")[-1][0]
+    assert behavior & (1 << 8)          # FullScreenAuxiliary: may join a full-screen Space
+    assert behavior & (1 << 1)          # MoveToActiveSpace: opens on the Space you're on
+    assert not behavior & (1 << 0)      # never with CanJoinAllSpaces (AppKit raises on the pair)
+    assert ui.webview.panel_collection_behavior("14.5") & (1 << 17)
+    assert not ui.webview.panel_collection_behavior("12.7") & (1 << 17)
+
+    fake_macos.CALLS.clear()
+    app._on_left_click()
+    assert app._panel.visible
+    assert _panel_calls("orderFrontRegardless") and _panel_calls("makeKeyWindow")
+    assert not any(m == "activateIgnoringOtherApps_" for _, m, _ in fake_macos.CALLS)
+    rect = _panel_calls("setFrame_display_")[-1][0]
+    assert (rect.origin.x, rect.origin.y + rect.size.height) == (1060, 870)   # under the icon
+
+    # The full-screen menu bar may have slid away already: the panel stays on screen.
+    app._panel.dismiss()
+    app._panel._last_dismiss = 0
+    monkeypatch.setitem(fake_macos.RETURNS, "convertRectToScreen_",
+                        lambda *a: fake_macos.Rect(1200, 925, 80, 24))
+    app._on_left_click()
+    rect = _panel_calls("setFrame_display_")[-1][0]
+    assert rect.origin.y + rect.size.height <= 900
+
+
+def test_panel_recovers_when_web_content_process_dies(ui):
+    app = start(ui.ClaudeBar(demo=True))
+    app._fetch_and_update()
+    app._flush_ui(None)
+    host = app._panel.host
+    fake_macos.CALLS.clear()
+    host._nav.webViewWebContentProcessDidTerminate_(host.webview)
+    assert not host.ready
+    assert any(m == "loadFileURL_allowingReadAccessToURL_" for _, m, _ in fake_macos.CALLS)
+    app._on_left_click()                       # clicked while the page reloads
+    assert app._panel.show_when_ready and not app._panel.visible
+    fake_macos.CALLS.clear()
+    send(host, action="ready", view="panel")
+    assert app._panel.visible
+    assert [s for s in js_calls("AIQ.render(") if s["view"] == "panel"]
+
+
+def test_classic_menu_option(ui):
+    app = start(ui.ClaudeBar(demo=True))
+    app._fetch_and_update()
+    send(app._panel.host, action="set", key="classic_menu", value=True)
+    app._flush_ui(None)
+    titles = [getattr(i, "title", None) for i in app.menu if i is not None]
+    assert "CLAUDE" in titles and "Settings…" in titles and "Usage History…" in titles
+    fake_macos.CALLS.clear()
+    app._on_left_click()
+    assert not app._panel.visible
+    assert any(m == "popUpStatusItemMenu_" for _, m, _ in fake_macos.CALLS)
+    send(app._panel.host, action="set", key="classic_menu", value=False)
+    app._flush_ui(None)
+    app._on_left_click()
+    assert app._panel.visible
+    assert "Show Usage" in [getattr(i, "title", None) for i in app.menu if i is not None]
+
+
+# ── more accounts ────────────────────────────────────────────────────────────
+
+def test_find_more_claude_accounts_end_to_end(ui, monkeypatch):
+    home = "sessionKey=home; lastActiveOrg=org-a"
+    sessions = [{"cookie": home, "source": "Firefox"},
+                {"cookie": "sessionKey=work", "source": "Chrome · Work"}]
+    monkeypatch.setattr(ui, "discover_sessions",
+                        lambda domain, name: sessions if domain == "claude.ai" else [])
+    orgs = {home: [{"uuid": "org-a", "label": "me@home.com", "chat": True}],
+            "sessionKey=work": [{"uuid": "org-b", "label": "me@acme.com", "chat": True}]}
+    monkeypatch.setattr(ui, "claude_orgs", lambda cookie: orgs[cookie])
+
+    def fetch_raw(cookie, org_id=None):
+        org = org_id or "org-a"
+        pct = {"org-a": 20, "org-b": 96}[org]
+        return {"usage": {"five_hour": {"utilization": pct, "resets_at": None}}, "org_id": org}
+    monkeypatch.setattr(ui, "fetch_raw", fetch_raw)
+    from aiquotabar.config import save_config
+    save_config({"cookie_str": home, "disabled_providers": ["chatgpt", "cursor", "copilot"]})
+
+    app = start(ui.ClaudeBar())
+    send(app._panel.host, action="open_settings", tab="accounts")
+    win = app._windows["settings"]
+    send(win.host, action="ready", view="settings")
+    fake_macos.CALLS.clear()
+    send(win.host, action="find_accounts", provider="claude")
+
+    (extra,) = app.config["extra_accounts"]
+    assert (extra["org_id"], extra["label"], extra["source"]) == ("org-b", "me@acme.com", "Chrome · Work")
+    assert [u.claude.session.pct for u in app._accounts] == [96]      # fetched with its own org
+    assert app._claude_label == "me@home.com"
+    assert extra["key"] in app._history                              # pace / history per account
+    assert any("Claude (me@acme.com) Current Session is at 96%" in n[1]
+               for n in fake_macos.NOTIFICATIONS)
+    app._flush_ui(None)
+    assert "Added 1 Claude account" in js_calls("AIQ.toast(")
+    panel = [s for s in js_calls("AIQ.render(") if s["view"] == "panel"][-1]
+    assert [c.get("account") for c in panel["cards"]] == ["me@home.com", "me@acme.com"]
+    with open(os.path.expanduser("~/.claude_bar_config.json")) as f:
+        assert json.load(f)["extra_accounts"][0]["key"] == extra["key"]
+
+    # Shown in the menu bar on request, tagged by company ("me" alone would be ambiguous).
+    send(win.host, action="set", key="bar_providers", value=["Claude", extra["key"]])
+    fake_macos.CALLS.clear()
+    app._update_title(app._snapshot())
+    pieces = [args[0] for _, m, args in fake_macos.CALLS if m == "initWithString_attributes_"]
+    assert "".join(pieces).startswith(" 20%    acme 96%")
+
+    # Scanning again finds nothing new; removing keeps it removed.
+    send(win.host, action="find_accounts", provider="claude")
+    assert len(app.config["extra_accounts"]) == 1
+    send(win.host, action="remove_account", key=extra["key"])
+    assert app.config["extra_accounts"] == [] and app._accounts == []
+    assert app.config["ignored_accounts"] == [extra["key"]] and app.config["bar_providers"] == ["Claude"]
+    send(win.host, action="find_accounts", provider="claude")
+    assert app.config["extra_accounts"] == []
+    send(win.host, action="unhide_accounts", provider="claude")
+    assert len(app.config["extra_accounts"]) == 1
+
+
+def test_pasted_cookie_can_be_added_as_another_account(ui, monkeypatch):
+    monkeypatch.setattr(ui, "claude_orgs",
+                        lambda cookie: [{"uuid": "org-z", "label": "Lab", "chat": True}]
+                        if cookie == "sessionKey=pasted" else [])
+    from aiquotabar.config import save_config
+    save_config({"cookie_str": "sessionKey=main; lastActiveOrg=org-a",
+                 "disabled_providers": ["chatgpt", "cursor", "copilot"]})
+    app = start(ui.ClaudeBar())
+    send(app._panel.host, action="add_account_cookie", provider="claude", value="sessionKey=pasted")
+    assert app.config["cookie_str"] == "sessionKey=main; lastActiveOrg=org-a"     # main untouched
+    assert [a["label"] for a in app.config["extra_accounts"]] == ["Lab"]
+    send(app._panel.host, action="add_account_cookie", provider="chatgpt", value="x" * 40)   # ignored
+    send(app._panel.host, action="add_account_cookie", provider="claude", value="short")    # ignored
+    assert len(app.config["extra_accounts"]) == 1
+
+
+def test_chatgpt_falls_back_to_codex_cli(ui, monkeypatch):
+    from aiquotabar import providers
+    from aiquotabar.config import save_config
+    from aiquotabar.providers import LimitRow, ProviderData
+    auth = {"access_token": "t", "account_id": "acct", "email": "me@lab.org", "expires_at": None}
+
+    def codex(a):
+        pd = ProviderData("ChatGPT", spent=40.0, limit=100.0, currency="", source="codex",
+                          account_label="me@lab.org", account_id="acct")
+        pd._rows = [LimitRow("Codex Tasks", 40, "", time.time() + 3600, 18000)]
+        return pd
+    monkeypatch.setattr(ui, "read_codex_auth", lambda: auth)
+    monkeypatch.setattr(providers, "fetch_chatgpt_codex", codex)
+    monkeypatch.setattr(ui, "fetch_chatgpt_codex", codex)
+    save_config({"disabled_providers": ["claude", "cursor", "copilot"]})   # no browser session at all
+
+    app = start(ui.ClaudeBar())
+    (pd,) = app._provider_data
+    assert pd.source == "codex" and pd.spent == 40.0
+    chat = next(a for a in app._settings_state(app._snapshot())["accounts"] if a["id"] == "chatgpt")
+    assert chat["status"] == "on" and chat["detail"] == "me@lab.org · Codex CLI"
+
+    # A stale browser session falls back too.
+    app.config["chatgpt_cookies"] = "__Secure-next-auth.session-token=stale"
+    app._fetch_and_update()
+    assert app._provider_data[0].source == "codex"
+
+    # Once Codex is tracked as its own account, the main card no longer borrows it.
+    app.config["extra_accounts"] = [{"key": "chatgpt@12345678", "provider": "chatgpt",
+                                     "label": "me@lab.org", "account_id": "acct", "source": "codex"}]
+    app._fetch_and_update()
+    assert app._provider_data[0].error and app._provider_data[0].source == "browser"
+    (u,) = app._accounts
+    assert u.data.source == "codex" and u.error is None
+
+
+def test_failing_extra_account_never_breaks_the_cycle(ui, monkeypatch):
+    from aiquotabar.config import save_config
+    save_config({"disabled_providers": ["cursor", "copilot"],
+                 "extra_accounts": [
+                     {"key": "claude@aaaaaaaa", "provider": "claude", "label": "a", "cookie": "x",
+                      "org_id": "o"},
+                     {"key": "chatgpt@bbbbbbbb", "provider": "chatgpt", "label": "b",
+                      "account_id": "z", "source": "codex"}]})
+    app = start(ui.ClaudeBar())                # fetch_raw / codex are offline in tests
+    assert [u.error["kind"] for u in app._accounts] == ["network", "network"]
+    assert app._last_updated is not None       # the cycle finished
+    from aiquotabar.viewmodel import build_panel_state
+    panel = build_panel_state(app._snapshot())
+    assert [c["state"] for c in panel["cards"] if c.get("account_key")] == ["error", "error"]
+
+
+def test_full_disk_access_helpers(ui):
+    app = start(ui.ClaudeBar(demo=True))
+    send(app._panel.host, action="reveal_python")
+    send(app._panel.host, action="open_privacy")
+    assert ["open", "-R", app._tcc_app] in ui.opened
+    assert ["open", ui.FULL_DISK_ACCESS_PANE] in ui.opened
+    assert app._settings_state(app._snapshot())["tcc_app"] == app._tcc_app

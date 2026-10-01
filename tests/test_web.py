@@ -54,8 +54,10 @@ def test_every_view_renders_without_errors(browser):
         "history": build_history_state(demo_history_rows(now), snap.trends, now),
         "welcome": {**build_settings_state(snap.config, snap=snap), "view": "welcome"},
     }
-    for variant in ("states", "empty"):
+    for variant in ("states", "empty", "accounts"):
         views[f"panel-{variant}"] = build_panel_state(demo_snapshot(variant, now))
+    multi = demo_snapshot("accounts", now)
+    views["settings-accounts"] = build_settings_state(multi.config, snap=multi, tab="accounts")
     for name, state in views.items():
         for theme in ("light", "dark"):
             page, errors = open_view(browser, name.split("-")[0], state, theme)
@@ -158,4 +160,50 @@ def test_claude_limits_picker(browser):
     assert page.get_by_role("button", name="Session", exact=True).is_disabled()   # last one stays
     page.get_by_role("button", name="Weekly", exact=True).click()
     assert {"action": "set", "key": "claude_bar_metrics", "value": ["session", "weekly"]} in outbox(page)
+    assert errors == []
+
+
+def test_more_accounts_ui(browser):
+    snap = demo_snapshot("accounts")
+    page, errors = open_view(browser, "panel", build_panel_state(snap))
+    labels = page.locator(".card-acct").all_inner_texts()
+    assert labels == ["sam@home.example", "sam@acme.example", "sam@acme.example", "sam@home.example"]
+    assert errors == []
+    page.close()
+
+    state = build_settings_state(snap.config, snap=snap, tcc_app="/Library/Frameworks/Python.app")
+    page, errors = open_view(browser, "settings", state)
+    page.get_by_role("button", name="Accounts").click()
+    page.get_by_role("button", name="Add another Claude account").click()
+    page.get_by_role("button", name="Add another ChatGPT account").click()
+    page.get_by_title("Stop tracking sam@acme.example").click()
+    page.get_by_role("button", name="Paste a Claude cookie manually…").click()
+    page.locator("textarea").fill("sessionKey=pasted")
+    page.get_by_role("button", name="Add as another account").click()
+    page.get_by_role("button", name="General").click()
+    page.get_by_role("switch", name="Classic menu").click()
+    page.get_by_role("button", name="Menu bar").click()
+    page.get_by_role("button", name="Claude · sam@acme.example").click()
+    page.get_by_role("button", name="About").click()
+    assert "/Library/Frameworks/Python.app" in page.locator("#app").inner_text()
+    page.get_by_role("button", name="Open Privacy").click()
+    sent = outbox(page)
+    assert {"action": "find_accounts", "provider": "claude"} in sent
+    assert {"action": "find_accounts", "provider": "chatgpt"} in sent
+    assert {"action": "remove_account", "key": "claude@0a1b2c3d"} in sent
+    assert {"action": "add_account_cookie", "provider": "claude", "value": "sessionKey=pasted"} in sent
+    assert {"action": "set", "key": "classic_menu", "value": True} in sent
+    assert {"action": "set", "key": "bar_providers",
+            "value": ["Claude", "ChatGPT", "claude@0a1b2c3d"]} in sent
+    assert {"action": "open_privacy"} in sent
+    assert errors == []
+
+
+def test_removed_accounts_can_be_brought_back(browser):
+    snap = demo_snapshot("accounts")
+    snap.config["ignored_accounts"] = ["claude@99999999", "claude@88888888"]
+    page, errors = open_view(browser, "settings", build_settings_state(snap.config, snap=snap))
+    page.get_by_role("button", name="Accounts").click()
+    page.get_by_role("button", name="Show 2 removed").click()
+    assert {"action": "unhide_accounts", "provider": "claude"} in outbox(page)
     assert errors == []

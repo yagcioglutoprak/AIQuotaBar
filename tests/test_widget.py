@@ -46,3 +46,18 @@ def test_turned_off_widget_is_left_alone(launched, monkeypatch, tmp_path):
 def test_quit_widget_host_does_not_launch_it(launched):
     widget._quit_widget_host()
     assert launched[0][0] == "osascript" and "is running" in launched[0][2]
+
+
+def test_codex_chatgpt_and_extra_accounts(launched, monkeypatch, tmp_path):
+    from aiquotabar.providers import ProviderData
+    monkeypatch.setattr(widget, "_is_widget_installed", lambda: False)
+    pd = ProviderData("ChatGPT", spent=10.0, limit=100.0, source="codex")
+    pd._rows = [LimitRow("Codex Tasks", 10, "")]
+    data = UsageData(session=LimitRow("Current Session", 42, "resets in 1h"))
+    widget._write_widget_cache(data, [pd], None, {
+        "cookie_str": "x", "bar_providers": ["Claude", "claude@0a1b2c3d", "ChatGPT"]})
+    with open(tmp_path / "usage.json") as f:
+        cache = json.load(f)
+    assert cache["active_providers"] == ["claude", "chatgpt"]     # Codex counts as signed in
+    assert cache["bar_providers"] == ["claude", "chatgpt"]        # extra accounts stay out
+    assert cache["chatgpt"]["rows"][0]["pct"] == 10

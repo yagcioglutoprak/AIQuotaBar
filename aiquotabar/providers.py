@@ -1,8 +1,11 @@
 """Data models and API fetch functions for all providers."""
 
+import base64
+import glob
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -55,6 +58,9 @@ class ProviderData:
     reset_str: str = ""
     resets_at: float | None = None
     window_secs: int | None = None
+    source: str = ""          # how it signed in: "browser" or "codex" (ChatGPT)
+    account_label: str = ""   # the account's email, when the provider tells us
+    account_id: str = ""      # provider-side account / workspace id
     _rows: list = field(default_factory=list, repr=False)
 
     @property
@@ -149,11 +155,12 @@ def _org_id_from_api(cookies: dict) -> str | None:
 
 
 
-def fetch_raw(cookie_str: str) -> dict:
+def fetch_raw(cookie_str: str, org_id: str | None = None) -> dict:
+    """Usage for one organization: `org_id`, else the one the cookie last used."""
     cookies = parse_cookie_string(cookie_str)
     log.debug("using cookies keys: %s", list(cookies.keys()))
 
-    org_id = _org_id_from_cookies(cookies)
+    org_id = org_id or _org_id_from_cookies(cookies)
     log.debug("org_id from cookie: %s", org_id)
 
     if not org_id:
@@ -171,6 +178,39 @@ def fetch_raw(cookie_str: str) -> dict:
     )
     log.debug("usage full response: %s", json.dumps(usage, indent=2))
     return {"usage": usage, "org_id": org_id}
+
+
+def claude_org_label(name) -> str:
+    """"jo@example.com's Organization" -> "jo@example.com" (other names as is)."""
+    name = (name or "").strip() if isinstance(name, str) else ""
+    m = re.match(r"^(.+?)['’]s [Oo]rganization$", name)
+    return m.group(1) if m else name
+
+
+def claude_orgs(cookie_str: str) -> list[dict]:
+    """Every organization a claude.ai session belongs to, in API order.
+
+    One sign-in can see several (say a personal Pro plan and a work Team
+    plan), and each has its own limits. Items: {"uuid", "label", "chat"};
+    "chat" is False for API-only (Console) organizations, which have no plan
+    limits. Raises on HTTP errors, so a dead session is not "no organizations".
+    """
+    data = _get("https://claude.ai/api/organizations", parse_cookie_string(cookie_str))
+    out = []
+    for org in data if isinstance(data, list) else []:
+        uuid = _org_uuid(org)
+        if not uuid:
+            continue
+        caps = org.get("capabilities")
+        chat = not (isinstance(caps, list) and caps and "chat" not in caps)
+        out.append({"uuid": str(uuid), "label": claude_org_label(org.get("name")), "chat": chat})
+    return out
+
+
+def claude_default_org(cookie_str: str, orgs: list[dict]) -> str | None:
+    """The organization fetch_raw() reads for this cookie (no explicit org)."""
+    return _org_id_from_cookies(parse_cookie_string(cookie_str)) or (
+        orgs[0]["uuid"] if orgs else None)
 
 
 # ── time helpers ──────────────────────────────────────────────────────────────
@@ -309,10 +349,65 @@ def _chatgpt_get(url: str, headers: dict, cookies: dict) -> dict:
         return _api_get(url, headers, cookies, keep_cf=True)
 
 
-def _chatgpt_access_token(cookies: dict) -> str | None:
-    """Exchange session cookie for a short-lived Bearer token."""
+def _chatgpt_session(cookies: dict) -> dict:
+    """/api/auth/session: a short-lived Bearer token plus the signed-in user."""
     data = _chatgpt_get("https://chatgpt.com/api/auth/session", _CHATGPT_HEADERS, cookies)
-    return data.get("accessToken")
+    return data if isinstance(data, dict) else {}
+
+
+def _jwt_claims(token) -> dict:
+    """A JWT's payload, unverified. Only used to label our own tokens."""
+    try:
+        payload = str(token).split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+_OPENAI_AUTH = "https://api.openai.com/auth"
+_OPENAI_PROFILE = "https://api.openai.com/profile"
+_UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _openai_identity(*tokens) -> tuple[str, str]:
+    """(ChatGPT account id, email) from OpenAI access / id tokens."""
+    acct = email = ""
+    for tok in tokens:
+        claims = _jwt_claims(tok) if tok else {}
+        auth = claims.get(_OPENAI_AUTH) if isinstance(claims.get(_OPENAI_AUTH), dict) else {}
+        prof = claims.get(_OPENAI_PROFILE) if isinstance(claims.get(_OPENAI_PROFILE), dict) else {}
+        acct = acct or str(auth.get("chatgpt_account_id") or "")
+        email = email or str(prof.get("email") or claims.get("email") or "")
+    return acct, email
+
+
+def _chatgpt_workspace(cookies: dict) -> str:
+    """The workspace picked in ChatGPT's account switcher (multi-workspace sign-ins)."""
+    ws = str(cookies.get("_account") or "")
+    return ws if _UUID_RE.match(ws) else ""
+
+
+def chatgpt_identity(cookie_str: str) -> tuple[str, str]:
+    """(account id, email) of a chatgpt.com browser session. Raises when signed out."""
+    cookies = parse_cookie_string(cookie_str)
+    session = _chatgpt_session(cookies)
+    token = session.get("accessToken")
+    if not token:
+        raise ValueError("Not logged in")
+    acct, email = _openai_identity(token)
+    user = session.get("user") if isinstance(session.get("user"), dict) else {}
+    return _chatgpt_workspace(cookies) or acct, email or str(user.get("email") or "")
+
+
+def _wham_get(token: str, account_id: str = "", cookies: dict | None = None) -> dict:
+    """Codex limits for the account (workspace) the token, or account_id, names."""
+    h = {**_CHATGPT_HEADERS, "Authorization": f"Bearer {token}"}
+    if account_id:
+        h["ChatGPT-Account-Id"] = account_id
+    url = "https://chatgpt.com/backend-api/wham/usage"
+    return _chatgpt_get(url, h, cookies) if cookies else _api_get(url, h)
 
 
 def _wham_limit_row(w: dict, label: str) -> LimitRow | None:
@@ -397,18 +492,95 @@ def _parse_wham_usage(data: dict) -> ProviderData:
 
 
 def fetch_chatgpt(cookie_str: str) -> ProviderData:
-    """Fetch ChatGPT / Codex usage via /backend-api/wham/usage."""
+    """Fetch ChatGPT / Codex usage via /backend-api/wham/usage (browser session)."""
     cookies = parse_cookie_string(cookie_str)
     try:
-        token = _chatgpt_access_token(cookies)
+        session = _chatgpt_session(cookies)
+        token = session.get("accessToken")
         if not token:
-            return ProviderData("ChatGPT", error="Not logged in")
-        h = {**_CHATGPT_HEADERS, "Authorization": f"Bearer {token}"}
-        data = _chatgpt_get("https://chatgpt.com/backend-api/wham/usage", h, cookies)
-        return _parse_wham_usage(data)
+            return ProviderData("ChatGPT", error="Not logged in", source="browser")
+        acct, email = _openai_identity(token)
+        user = session.get("user") if isinstance(session.get("user"), dict) else {}
+        workspace = _chatgpt_workspace(cookies)
+        pd = _parse_wham_usage(_wham_get(token, workspace, cookies))
+        pd.source, pd.account_id = "browser", workspace or acct
+        pd.account_label = email or str(user.get("email") or "")
+        return pd
     except Exception as e:
         log.debug("fetch_chatgpt failed: %s", e)
-        return ProviderData("ChatGPT", error=str(e)[:80])
+        return ProviderData("ChatGPT", error=str(e)[:80], source="browser")
+
+
+# ── ChatGPT via Codex CLI (~/.codex/auth.json) ───────────────────────────────
+
+def codex_auth_file() -> str:
+    home = os.environ.get("CODEX_HOME") or "~/.codex"
+    return os.path.join(os.path.expanduser(home), "auth.json")
+
+
+def read_codex_auth() -> dict | None:
+    """The ChatGPT sign-in Codex CLI keeps in ~/.codex/auth.json, or None.
+
+    Read-only on purpose: refreshing the token here would rotate Codex's
+    refresh token and sign Codex itself out. Codex refreshes it whenever it
+    runs, so reading the file each cycle always gets the newest one.
+    """
+    try:
+        with open(codex_auth_file()) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, dict) or not tokens.get("access_token"):
+        return None      # signed out, or an API-key login (no plan limits)
+    token = str(tokens["access_token"])
+    acct, email = _openai_identity(token, tokens.get("id_token"))
+    exp = _jwt_claims(token).get("exp")
+    return {"access_token": token, "account_id": str(tokens.get("account_id") or acct),
+            "email": email,
+            "expires_at": float(exp) if isinstance(exp, (int, float)) else None}
+
+
+def fetch_chatgpt_codex(auth: dict | None = None) -> ProviderData:
+    """ChatGPT / Codex usage with the Codex CLI's token instead of a browser cookie."""
+    auth = auth or read_codex_auth()
+    if not auth:
+        return ProviderData("ChatGPT", error="Not logged in", source="codex")
+    if auth.get("expires_at") and auth["expires_at"] < time.time():
+        return ProviderData("ChatGPT", error="Codex sign-in expired", source="codex",
+                            account_label=auth.get("email", ""),
+                            account_id=auth.get("account_id", ""))
+    try:
+        pd = _parse_wham_usage(_wham_get(auth["access_token"], auth.get("account_id", "")))
+    except Exception as e:
+        log.debug("fetch_chatgpt_codex failed: %s", e)
+        pd = ProviderData("ChatGPT", error=str(e)[:80])
+    pd.source, pd.account_label = "codex", auth.get("email", "")
+    pd.account_id = auth.get("account_id", "")
+    return pd
+
+
+def fetch_chatgpt_with_fallback(cookie_str: str | None, codex_auth: dict | None = None,
+                                fetch_cookie=None) -> ProviderData:
+    """Browser session first; if it is missing or fails, Codex CLI's sign-in
+    (`codex_auth`, from read_codex_auth(); None to skip it)."""
+    fetch_cookie = fetch_cookie or fetch_chatgpt
+    try:
+        pd = fetch_cookie(cookie_str) if cookie_str else None
+    except Exception as e:
+        pd = ProviderData("ChatGPT", error=str(e)[:80], source="browser")
+    if pd is not None and not pd.error:
+        return pd
+    auth = codex_auth
+    if auth:
+        cpd = fetch_chatgpt_codex(auth)
+        if not cpd.error:
+            log.info("ChatGPT: using ~/.codex/auth.json token (browser session %s)",
+                     "stale" if pd is not None else "not found")
+            return cpd
+        if pd is None:
+            return cpd
+    return pd or ProviderData("ChatGPT", error="Not logged in")
 
 
 def fetch_openai(api_key: str) -> ProviderData:
@@ -631,26 +803,33 @@ import sys, json
 
 domain  = sys.argv[1]
 target  = sys.argv[2]
+# Optional: [[browser, cookie_file, label], ...] to read specific profiles.
+specs   = json.loads(sys.argv[3]) if len(sys.argv) > 3 else None
 
 BROWSERS = [
     'firefox', 'librewolf', 'chrome', 'arc', 'brave',
     'edge', 'chromium', 'opera', 'vivaldi', 'safari',
 ]
+if specs is None:
+    specs = [[name, None, name] for name in BROWSERS]
 
 # Collect candidates from every browser that has the target cookie.
 # Rank by expiry as a hint, but the caller VALIDATES each candidate and
 # uses the first that actually authenticates -- a stale session in one
 # browser must never mask a valid one in another.
-candidates = []  # list of (expires_seconds, cookie_str)
+candidates = []  # list of (expires_seconds, cookie_str, label)
 
 try:
     import browser_cookie3
-    for name in BROWSERS:
+    for name, cookie_file, label in specs:
         fn = getattr(browser_cookie3, name, None)
         if fn is None:
             continue
         try:
-            jar = fn(domain_name=domain)
+            if cookie_file:
+                jar = fn(cookie_file=cookie_file, domain_name=domain)
+            else:
+                jar = fn(domain_name=domain)
             cookies = {x.name: x for x in jar}
             if target in cookies:
                 expiry_key = target
@@ -678,7 +857,7 @@ try:
             while expires > 1e11:
                 expires /= 1000.0
             cookie_str = '; '.join(f'{k}={c.value}' for k, c in cookies.items())
-            candidates.append((expires, cookie_str))
+            candidates.append((expires, cookie_str, label))
         except Exception:
             pass
 except Exception:
@@ -686,7 +865,10 @@ except Exception:
 
 # Rank best-first: latest (normalized) expiry, tie-break by richest jar.
 candidates.sort(key=lambda x: (x[0], len(x[1])), reverse=True)
-result = [c[1] for c in candidates]
+if len(sys.argv) > 3:
+    result = [{"cookie": c[1], "source": c[2]} for c in candidates]
+else:
+    result = [c[1] for c in candidates]
 
 print(json.dumps(result))
 """
@@ -714,6 +896,96 @@ def _run_cookie_detection(domain: str, target_cookie: str) -> list[str]:
     except Exception as e:
         log.debug("_run_cookie_detection failed: %s", e)
     return []
+
+
+# Chromium-based browsers keep one cookie database per profile under their
+# user-data folder; browser_cookie3 on its own only reads the first one.
+_CHROMIUM_DIRS = {
+    "chrome":   ("Chrome", "Google/Chrome"),
+    "arc":      ("Arc", "Arc/User Data"),
+    "brave":    ("Brave", "BraveSoftware/Brave-Browser"),
+    "edge":     ("Edge", "Microsoft Edge"),
+    "chromium": ("Chromium", "Chromium"),
+    "vivaldi":  ("Vivaldi", "Vivaldi"),
+}
+_FIREFOX_DIRS = {
+    "firefox":   ("Firefox", "Firefox/Profiles"),
+    "librewolf": ("LibreWolf", "librewolf/Profiles"),
+}
+_SINGLE_PROFILE = (("opera", "Opera"), ("safari", "Safari"))
+
+
+def _chromium_profile_names(user_data: str) -> dict:
+    """Profile folder -> the name the person gave it (from "Local State")."""
+    try:
+        with open(os.path.join(user_data, "Local State")) as f:
+            cache = json.load(f)["profile"]["info_cache"]
+        return {k: v.get("name") for k, v in cache.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
+def browser_profiles(home: str | None = None) -> list[list]:
+    """[browser, cookie file, label] for every profile of every browser found.
+
+    Lets account discovery see a second Chrome profile (or Firefox profile)
+    signed in to another account. Browsers without separate profiles are
+    read the normal way (cookie file None).
+    """
+    support = os.path.join(home or os.path.expanduser("~"), "Library", "Application Support")
+    specs: list[list] = []
+    for name, (title, rel) in _CHROMIUM_DIRS.items():
+        base = os.path.join(support, rel)
+        names = None
+        for prof in sorted(glob.glob(os.path.join(base, "*", ""))):
+            prof = prof.rstrip(os.sep)
+            folder = os.path.basename(prof)
+            if folder in ("System Profile", "Guest Profile"):
+                continue
+            # Chrome 96+ moved the database to Network/Cookies; an old copy can linger.
+            path = next((p for p in (os.path.join(prof, "Network", "Cookies"),
+                                     os.path.join(prof, "Cookies")) if os.path.isfile(p)), None)
+            if path:
+                if names is None:
+                    names = _chromium_profile_names(base)
+                specs.append([name, path, f"{title} · {names.get(folder) or folder}"])
+    for name, (title, rel) in _FIREFOX_DIRS.items():
+        for path in sorted(glob.glob(os.path.join(support, rel, "*", "cookies.sqlite"))):
+            folder = os.path.basename(os.path.dirname(path))
+            specs.append([name, path, f"{title} · {folder.split('.', 1)[-1]}"])
+    specs += [[name, None, title] for name, title in _SINGLE_PROFILE]
+    return specs
+
+
+def discover_sessions(domain: str, target_cookie: str) -> list[dict]:
+    """Every distinct session for `domain` across all browsers and profiles.
+
+    Items: {"cookie": str, "source": "Chrome · Work"}, best first. Unlike
+    _run_cookie_detection() (which feeds the main account) this looks at
+    every profile, so it can find a second account.
+    """
+    specs = browser_profiles()
+    # Also the browsers' own default lookup, in case a profile lives elsewhere.
+    specs += [[name, None, title] for name, (title, _rel) in
+              {**_CHROMIUM_DIRS, **_FIREFOX_DIRS}.items()]
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", _DETECT_SCRIPT, domain, target_cookie, json.dumps(specs)],
+            capture_output=True, text=True, timeout=120,
+        )
+        log.debug("session discovery rc=%d found=%s err=%r", r.returncode,
+                  r.stdout.count('"cookie"'), r.stderr[:200])
+        data = json.loads(r.stdout.strip() or "[]")
+    except Exception as e:
+        log.debug("discover_sessions failed: %s", e)
+        return []
+    seen, out = set(), []
+    for item in data if isinstance(data, list) else []:
+        cookie = item.get("cookie") if isinstance(item, dict) else None
+        if cookie and cookie not in seen:
+            seen.add(cookie)
+            out.append({"cookie": cookie, "source": str(item.get("source") or "")})
+    return out
 
 
 def _claude_cookie_is_valid(cookie_str: str) -> bool:

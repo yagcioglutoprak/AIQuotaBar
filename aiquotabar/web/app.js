@@ -334,7 +334,8 @@
       ring(hr.pct, color, hr.pace_pct, 64),
       h("div", null,
         h("div", { class: "hero-eyebrow" }, providerIcon({ id: hr.provider, name: hr.name, color: hr.color, mask: hr.mask }),
-          hr.name + " · " + hr.label),
+          h("span", { class: "t", title: hr.account_full || null },
+            hr.name + (hr.account ? " (" + hr.account + ")" : "") + " · " + hr.label)),
         h("div", { class: "hero-title" }, hr.headline),
         h("div", { class: "hero-sub" }, icon("clock", "xs"),
           h("span", { "data-reset-ts": hr.reset_ts || null, "data-reset-fallback": hr.reset_text || "",
@@ -347,6 +348,7 @@
   function card(c) {
     var head = h("div", { class: "card-head" },
       providerIcon(c), h("span", { class: "card-name" }, c.name),
+      c.account ? h("span", { class: "card-acct", title: c.account }, c.account) : null,
       c.status ? chip(c.status.tone, c.status.text) : null,
       h("span", { class: "spacer" }),
       c.summary ? h("span", { class: "summary num" }, c.summary) : null,
@@ -571,7 +573,9 @@
           return h("button", { class: iv.secs === g.refresh_interval ? "on" : "", role: "radio",
             "aria-checked": iv.secs === g.refresh_interval ? "true" : "false",
             onclick: function () { setting("refresh_interval", iv.secs); } }, iv.label);
-        })), "Faster refresh makes pace predictions more accurate.")),
+        })), "Faster refresh makes pace predictions more accurate."),
+        row("Classic menu", toggle(g.classic_menu, function (v) { setting("classic_menu", v); }, "Classic menu"),
+          "Clicking the menu bar icon opens a plain text menu instead of this panel.")),
       h("div", { class: "group-title" }, "Alert thresholds"),
       h("div", { class: "group" },
         rangeRow("Warning", "warn_threshold", g.warn, 50, 94, "Turns amber and sends a heads-up."),
@@ -583,7 +587,7 @@
 
   function sMenubar(st) {
     var mb = st.menubar;
-    var chosen = mb.providers.filter(function (p) { return p.on; }).map(function (p) { return p.name; });
+    var chosen = mb.providers.filter(function (p) { return p.on; }).map(function (p) { return p.value || p.name; });
     var preview = h("div", { class: "mb-preview", "aria-label": "Preview" },
       h("span", { class: "dim" }, "Wed 14:32"));
     var demo = { Claude: [78, "2h 14m"], ChatGPT: [64, "2d 6h"], Cursor: [48, "11d"], Copilot: [62, "8d"] };
@@ -591,8 +595,13 @@
     var metrics = mb.claude_metrics.filter(function (m) { return m.on; });
     var tags = { session: "5h", weekly: "7d", weekly_sonnet: "7d·S" };
     mb.providers.filter(function (p) { return p.on; }).forEach(function (p, i) {
-      var d = demo[p.name] || [0, ""];
+      var d = demo[p.base || p.name] || [0, ""];
       var reset = mb.show_reset && i === 0 ? " · " + d[1] : "";
+      if (p.account) {
+        preview.insertBefore(h("span", { class: "seg-i" }, providerIcon(p),
+          h("small", null, p.tag || ""), " " + Math.round(d[0] / 3) + "%" + reset), preview.lastChild);
+        return;
+      }
       if (p.name === "Claude" && metrics.length > 1) {
         preview.insertBefore(h("span", { class: "seg-i" }, providerIcon(p), metrics.map(function (m, j) {
           return [h("small", null, (j ? " " : "") + tags[m.id]), " " + claudeDemo[m.id] + "%" + (j === 0 ? reset : "")];
@@ -613,9 +622,10 @@
           setting("bar_providers", v ? [] : chosen);
         }, "Pick automatically"), "Shows the first two services you use."),
         h("div", { class: "row" }, h("div", { class: "checks" }, mb.providers.map(function (p) {
+          var val = p.value || p.name;
           return h("button", { class: "check" + (p.on ? " on" : ""), "aria-pressed": p.on ? "true" : "false",
             onclick: function () {
-              var next = p.on ? chosen.filter(function (n) { return n !== p.name; }) : chosen.concat([p.name]);
+              var next = p.on ? chosen.filter(function (n) { return n !== val; }) : chosen.concat([val]);
               setting("bar_providers", next);
             } }, providerIcon(p), p.name);
         })))),
@@ -640,6 +650,31 @@
     ];
   }
 
+  // Extra accounts under the Claude / ChatGPT rows, plus "Add another account".
+  var ADD_HINT = {
+    claude: "Sign in to it in another browser or browser profile first. A personal and a Team plan on one sign-in are found too.",
+    chatgpt: "Sign in to it in another browser or browser profile, or with Codex CLI (codex login).",
+  };
+  function moreAccounts(a) {
+    var rows = (a.extras || []).map(function (x) {
+      return h("div", { class: "row sub" },
+        h("div", { class: "grow" }, h("div", { class: "title ell", title: x.label }, x.label),
+          h("div", { class: "desc" }, h("span", { class: "status-dot " + x.status }), x.detail)),
+        h("button", { class: "btn ghost quiet", title: "Stop tracking " + x.label,
+          onclick: function () { send("remove_account", { key: x.key }); } }, "Remove"));
+    });
+    var busy = a.status === "busy";
+    rows.push(h("div", { class: "row sub" },
+      h("div", { class: "grow" },
+        h("button", { class: "link add-acct", disabled: busy,
+          onclick: function () { send("find_accounts", { provider: a.id }); } },
+          icon("plus", "xs"), busy ? "Looking for accounts…" : "Add another " + a.name + " account"),
+        h("div", { class: "desc" }, ADD_HINT[a.id] || "")),
+      a.hidden ? h("button", { class: "btn ghost quiet", title: "Bring back accounts you removed",
+        onclick: function () { send("unhide_accounts", { provider: a.id }); } }, "Show " + a.hidden + " removed") : null));
+    return rows;
+  }
+
   function sAccounts(st) {
     var rows = st.accounts.map(function (a) {
       var dot = h("span", { class: "status-dot " + a.status });
@@ -654,9 +689,10 @@
         actions.appendChild(h("button", { class: "btn ghost quiet", title: "Stop tracking " + a.name,
           onclick: function () { send("disable", { provider: a.id }); } }, "Turn off"));
       }
-      return h("div", { class: "row" }, providerIcon(a),
+      var main = h("div", { class: "row" }, providerIcon(a),
         h("div", { class: "grow" }, h("div", { class: "title" }, a.name),
           h("div", { class: "desc" }, dot, a.detail)), actions);
+      return [main, a.multi && a.status !== "off" ? moreAccounts(a) : null];
     });
     var manual = h("div", { class: "row", style: "display:block" },
       h("button", { class: "link", onclick: function () { ui.cookieOpen = !ui.cookieOpen; render(STATE); } },
@@ -666,9 +702,13 @@
         oninput: function () { ui.drafts.cookie = ta.value; } });
       ta.value = ui.drafts.cookie || "";
       manual.appendChild(h("div", { class: "field" }, ta,
-        h("button", { class: "btn primary", onclick: function () {
-          if (ta.value.trim()) { send("set_cookie", { provider: "claude", value: ta.value.trim() }); ui.drafts.cookie = ""; ta.value = ""; toast("Cookie saved — refreshing"); }
-        } }, "Save")));
+        h("div", { class: "field-btns" },
+          h("button", { class: "btn primary", title: "Replace the main Claude account", onclick: function () {
+            if (ta.value.trim()) { send("set_cookie", { provider: "claude", value: ta.value.trim() }); ui.drafts.cookie = ""; ta.value = ""; toast("Cookie saved — refreshing"); }
+          } }, "Save"),
+          h("button", { class: "btn", title: "Keep the main account and add this one next to it", onclick: function () {
+            if (ta.value.trim()) { send("add_account_cookie", { provider: "claude", value: ta.value.trim() }); ui.drafts.cookie = ""; ta.value = ""; }
+          } }, "Add as another account"))));
       manual.appendChild(h("div", { class: "desc", style: "margin-top:6px" },
         "Open claude.ai/settings/usage → Developer Tools → Network → any request → copy the “cookie” header."));
     }
@@ -740,6 +780,12 @@
       h("div", { class: "group" },
         row("Log file", h("button", { class: "btn", onclick: function () { send("open_logs"); } }, "Show"), "~/.claude_bar.log"),
         row("Raw Claude API response", h("button", { class: "btn", onclick: function () { send("show_raw"); } }, "Show"), "Useful when reporting a bug."),
+        row("Safari sessions", h("div", { style: "display:flex;gap:6px" },
+            h("button", { class: "btn", onclick: function () { send("reveal_python"); } }, "Show app"),
+            h("button", { class: "btn", onclick: function () { send("open_privacy"); } }, "Open Privacy")),
+          ["Reading Safari's cookies needs Full Disk Access for ",
+           h("span", { class: "path" }, st.tcc_app || "Python"),
+           " (not the python3 in the install folder)."]),
         row("Report an issue", h("button", { class: "btn", onclick: function () { send("open_url", { url: st.repo_url + "/issues" }); } }, "Open"), null)),
       h("div", { style: "margin-top:16px;display:flex;gap:8px" },
         h("button", { class: "btn", onclick: function () { send("quit"); } }, icon("power", "sm"), "Quit AIQuotaBar")),

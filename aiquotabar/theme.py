@@ -36,8 +36,9 @@ def brand_color(provider_id: str) -> str:
 
 
 def history_color(key: str) -> str:
-    """Colour for a history key such as 'claude' or 'chatgpt_codex_tasks'."""
+    """Colour for a history key such as 'claude', 'chatgpt_codex_tasks' or an
+    extra account's 'claude@1a2b3c4d'."""
     for pid in PROVIDERS:
-        if key == pid or key.startswith(pid + "_"):
+        if key == pid or key.startswith(pid + "_") or key.startswith(pid + "@"):
             return PROVIDERS[pid]["color"]
     return NEUTRAL

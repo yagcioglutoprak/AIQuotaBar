@@ -140,6 +140,7 @@ rm -rf /Applications/AIQuotaBarHost.app      # the desktop widget, if installed
 <summary><b>It doesn't find my account</b></summary>
 
 Sign in to the service in your browser, then open **Settings → Accounts → Detect** (or click **Reconnect** on the card). For Claude you can also paste a cookie manually on the same page.
+More help, including ChatGPT via Codex CLI, Safari and several accounts: [Troubleshooting](docs/troubleshooting.md).
 </details>
 
 <details>
