@@ -60,7 +60,7 @@ body:
     attributes:
       label: AIQuotaBar version
       description: "Run `python3 ~/.ai-quota-bar/claude_bar.py --version` (or `python3 claude_bar.py --version` in your clone)."
-      placeholder: "AIQuotaBar 2.1.0"
+      placeholder: "AIQuotaBar 2.1.1"
     validations:
       required: true
 
