@@ -175,6 +175,96 @@ def test_chatgpt_403_without_cloudflare_cookies_is_not_retried(monkeypatch):
     assert pd.error and calls == [("session", False)]
 
 
+# ── ChatGPT through the Codex CLI login ──────────────────────────────────────
+
+@pytest.fixture
+def codex_login(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+
+    def write(tokens):
+        (tmp_path / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": tokens}))
+    return write
+
+
+def _fake_wham(monkeypatch, session_status=200, usage_status=200):
+    calls = []
+
+    def fake_get(url, headers=None, cookies=None, **kw):
+        calls.append((url.rsplit("/", 1)[-1], dict(headers or {}), bool(cookies)))
+        if url.endswith("/session"):
+            return _Resp(session_status, {"accessToken": "browser-tok"})
+        return _Resp(usage_status, _WHAM)
+    monkeypatch.setattr(providers.requests, "get", fake_get)
+    return calls
+
+
+def test_chatgpt_falls_back_to_codex_login_when_browser_session_fails(monkeypatch, codex_login):
+    codex_login({"access_token": "codex-tok", "account_id": "acct-1"})
+    calls = _fake_wham(monkeypatch, session_status=401)
+    pd = providers.fetch_chatgpt(_CHATGPT_COOKIES)
+    assert pd.error is None and pd.spent == 30.0
+    assert [c[0] for c in calls] == ["session", "usage"]
+    _, headers, sent_cookies = calls[1]
+    assert headers["Authorization"] == "Bearer codex-tok"
+    assert headers["ChatGPT-Account-Id"] == "acct-1"
+    assert sent_cookies is False
+
+
+def test_working_browser_session_never_reads_the_codex_login(monkeypatch, codex_login):
+    codex_login({"access_token": "codex-tok"})
+    calls = _fake_wham(monkeypatch)
+    assert providers.fetch_chatgpt(_CHATGPT_COOKIES).error is None
+    assert all(h.get("Authorization") != "Bearer codex-tok" for _, h, _ in calls)
+
+
+def test_codex_marker_skips_the_browser(monkeypatch, codex_login):
+    codex_login({"access_token": "codex-tok"})
+    calls = _fake_wham(monkeypatch)
+    pd = providers.fetch_chatgpt(providers.CODEX_CLI_SESSION)
+    assert pd.error is None and pd.spent == 30.0
+    assert [c[0] for c in calls] == ["usage"]
+    assert "ChatGPT-Account-Id" not in calls[0][1]
+
+
+def test_codex_marker_without_a_login_reports_signed_out(monkeypatch, codex_login):
+    calls = _fake_wham(monkeypatch)
+    pd = providers.fetch_chatgpt(providers.CODEX_CLI_SESSION)
+    assert pd.error == "Not logged in" and calls == []
+
+
+def test_both_logins_failing_keeps_the_browser_error(monkeypatch, codex_login):
+    codex_login({"access_token": "expired-tok"})
+    calls = _fake_wham(monkeypatch, session_status=401, usage_status=401)
+    pd = providers.fetch_chatgpt(_CHATGPT_COOKIES)
+    assert "401" in pd.error
+    assert [c[0] for c in calls] == ["session", "usage"]
+
+
+@pytest.mark.parametrize("content", [
+    '{"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x", "tokens": null}',
+    '{"tokens": {"access_token": ""}}',
+    "not json",
+    "[]",
+])
+def test_codex_login_ignores_files_without_a_chatgpt_token(tmp_path, monkeypatch, content):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    (tmp_path / "auth.json").write_text(content)
+    assert providers._codex_login() is None
+
+
+def test_detection_falls_back_to_the_codex_login(monkeypatch, codex_login):
+    monkeypatch.setattr(providers, "_BROWSER_COOKIE3_OK", True)
+    monkeypatch.setattr(providers, "_run_cookie_detection", lambda domain, target: [])
+    assert providers._auto_detect_chatgpt_cookies() is None
+    codex_login({"access_token": "codex-tok"})
+    assert providers._auto_detect_chatgpt_cookies() == providers.CODEX_CLI_SESSION
+    monkeypatch.setattr(providers, "_run_cookie_detection", lambda domain, target: ["a=1"])
+    assert providers._auto_detect_chatgpt_cookies() == "a=1"        # a browser session wins
+    # Without browser_cookie3 (a failed install) the Codex login still works.
+    monkeypatch.setattr(providers, "_BROWSER_COOKIE3_OK", False)
+    assert providers._auto_detect_chatgpt_cookies() == providers.CODEX_CLI_SESSION
+
+
 # ── browser cookie detection (the real child-process script) ─────────────────
 
 _FAKE_BROWSER_COOKIE3 = """

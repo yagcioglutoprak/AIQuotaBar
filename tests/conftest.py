@@ -10,6 +10,7 @@ import tempfile
 
 _HOME = tempfile.mkdtemp(prefix="aiquotabar-test-home-")
 os.environ["HOME"] = _HOME
+os.environ.pop("CODEX_HOME", None)
 os.makedirs(os.path.join(_HOME, "Downloads"), exist_ok=True)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

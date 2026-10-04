@@ -106,6 +106,10 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
   All notifications go through `_notify()` which swallows the exception silently.
 - **Cookies are cached** in `~/.claude_bar_config.json`. Auto-detect runs on first launch
   and on repeated 401/403 failures to silently refresh the session.
+- **ChatGPT falls back to the Codex CLI login** (`$CODEX_HOME` or `~/.codex/auth.json`) when no
+  browser session is found or the stored one fails. `chatgpt_cookies == "codex-cli"` marks that
+  mode. The token is read on every fetch, never copied into our config and never refreshed:
+  a refresh rotates Codex's refresh token and signs the Codex CLI out.
 
 ## API behaviour (confirmed)
 
