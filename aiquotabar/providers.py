@@ -396,8 +396,31 @@ def _parse_wham_usage(data: dict) -> ProviderData:
     return pd
 
 
-def fetch_chatgpt(cookie_str: str) -> ProviderData:
-    """Fetch ChatGPT / Codex usage via /backend-api/wham/usage."""
+# Stored in `chatgpt_cookies` when no browser session was found but the Codex
+# CLI is signed in to ChatGPT: it means "use the Codex login", not a cookie.
+CODEX_CLI_SESSION = "codex-cli"
+
+
+def _codex_login() -> tuple[str, str | None] | None:
+    """(access token, account id) from the Codex CLI's ChatGPT login, or None.
+
+    Read on every fetch, never copied into our config. The token is used as is
+    and never refreshed: a refresh rotates the refresh token and would sign the
+    Codex CLI out. Codex refreshes it itself the next time it runs.
+    """
+    home = os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex")
+    try:
+        with open(os.path.join(home, "auth.json")) as f:
+            tokens = json.load(f).get("tokens") or {}
+    except (OSError, ValueError, AttributeError):
+        return None
+    token, account = tokens.get("access_token"), tokens.get("account_id")
+    if not isinstance(token, str) or not token:
+        return None
+    return token, account if isinstance(account, str) and account else None
+
+
+def _fetch_chatgpt_browser(cookie_str: str) -> ProviderData:
     cookies = parse_cookie_string(cookie_str)
     try:
         token = _chatgpt_access_token(cookies)
@@ -407,8 +430,44 @@ def fetch_chatgpt(cookie_str: str) -> ProviderData:
         data = _chatgpt_get("https://chatgpt.com/backend-api/wham/usage", h, cookies)
         return _parse_wham_usage(data)
     except Exception as e:
-        log.debug("fetch_chatgpt failed: %s", e)
+        log.debug("fetch_chatgpt (browser) failed: %s", e)
         return ProviderData("ChatGPT", error=str(e)[:80])
+
+
+def _fetch_chatgpt_codex() -> ProviderData | None:
+    """None when the Codex CLI isn't signed in to ChatGPT."""
+    login = _codex_login()
+    if login is None:
+        return None
+    token, account = login
+    h = {**_CHATGPT_HEADERS, "Authorization": f"Bearer {token}"}
+    if account:
+        h["ChatGPT-Account-Id"] = account
+    try:
+        return _parse_wham_usage(_api_get("https://chatgpt.com/backend-api/wham/usage", h))
+    except Exception as e:
+        log.debug("fetch_chatgpt (codex) failed: %s", e)
+        return ProviderData("ChatGPT", error=str(e)[:80])
+
+
+def fetch_chatgpt(cookie_str: str) -> ProviderData:
+    """Fetch ChatGPT / Codex usage via /backend-api/wham/usage.
+
+    The browser session goes first. Browser cookies for chatgpt.com are often
+    missing or stale (#2, #32) while the Codex CLI login still works, so any
+    browser failure falls back to that login before reporting an error.
+    """
+    pd = None
+    if cookie_str != CODEX_CLI_SESSION:
+        pd = _fetch_chatgpt_browser(cookie_str)
+        if not pd.error:
+            return pd
+    codex = _fetch_chatgpt_codex()
+    if codex is not None and not codex.error:
+        if pd is not None:
+            log.debug("ChatGPT browser session failed (%s); using the Codex CLI login", pd.error)
+        return codex
+    return pd or codex or ProviderData("ChatGPT", error="Not logged in")
 
 
 def fetch_openai(api_key: str) -> ProviderData:
@@ -757,11 +816,13 @@ def _auto_detect_cookies() -> str | None:
 
 
 def _auto_detect_chatgpt_cookies() -> str | None:
-    """Detect chatgpt.com session cookies from the browser (crash-safe subprocess)."""
-    if not _BROWSER_COOKIE3_OK:
-        return None
-    cands = _run_cookie_detection("chatgpt.com", "__Secure-next-auth.session-token")
-    return cands[0] if cands else None
+    """Detect chatgpt.com session cookies from the browser (crash-safe subprocess),
+    else the Codex CLI's ChatGPT login."""
+    if _BROWSER_COOKIE3_OK:
+        cands = _run_cookie_detection("chatgpt.com", "__Secure-next-auth.session-token")
+        if cands:
+            return cands[0]
+    return CODEX_CLI_SESSION if _codex_login() else None
 
 
 def _auto_detect_copilot_cookies() -> str | None:

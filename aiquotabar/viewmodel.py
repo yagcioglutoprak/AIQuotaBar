@@ -20,7 +20,7 @@ from aiquotabar.config import (
 )
 from aiquotabar.history import _calc_eta_minutes
 from aiquotabar.providers import (
-    LimitRow, ProviderData, UsageData, PROVIDER_REGISTRY, COOKIE_PROVIDERS,
+    CODEX_CLI_SESSION, LimitRow, ProviderData, UsageData, PROVIDER_REGISTRY, COOKIE_PROVIDERS,
     fmt_reset_ts,
 )
 
@@ -683,6 +683,8 @@ def build_settings_state(cfg: dict, *, snap: Snapshot | None = None,
             status, detail = "busy", "Looking in your browsers…"
         elif err and connected:
             status, detail = "error", _friendly_error(pid, err)["title"]
+        elif connected and cfg.get(COOKIE_KEYS[pid]) == CODEX_CLI_SESSION:
+            status, detail = "on", "Connected via the Codex CLI"
         elif connected:
             status, detail = "on", "Connected via browser session"
         else:

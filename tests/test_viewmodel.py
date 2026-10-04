@@ -324,6 +324,15 @@ def test_settings_state_masks_api_keys():
     assert "abcdefghijklmnop" not in str(st)
 
 
+def test_settings_state_says_how_chatgpt_is_connected():
+    def chatgpt(value):
+        st = build_settings_state({"chatgpt_cookies": value})
+        a = next(a for a in st["accounts"] if a["id"] == "chatgpt")
+        return a["status"], a["detail"]
+    assert chatgpt("codex-cli") == ("on", "Connected via the Codex CLI")
+    assert chatgpt("__Secure-next-auth.session-token=x") == ("on", "Connected via browser session")
+
+
 # ── history ──────────────────────────────────────────────────────────────────
 
 def test_history_state_orders_series_and_drops_empty():
