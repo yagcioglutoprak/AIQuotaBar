@@ -2,6 +2,7 @@
 
 import json
 import sys
+from datetime import datetime
 
 import pytest
 
@@ -67,6 +68,39 @@ def test_prints_every_connected_provider(cache, monkeypatch, capsys, flag):
     # Older snapshots have no resets_at: still valid, just null.
     assert out["providers"]["chatgpt"]["limits"][0]["resets_at"] is None
     assert out["providers"]["copilot"]["limits"][0]["pct"] == 40
+    # Every limit has the same keys, so scripts can loop over all providers.
+    for prov in out["providers"].values():
+        for limit in prov["limits"]:
+            assert {"label", "pct", "reset", "resets_at"} <= set(limit)
+
+
+UPDATED = datetime.fromisoformat(SAMPLE["updated_at"]).timestamp()
+
+
+def test_fresh_data_is_not_stale():
+    out = widget.usage_for_cli(SAMPLE, now=UPDATED + 5 * 60)
+    assert out["age_secs"] == 300 and out["stale"] is False
+
+
+def test_old_or_undated_data_is_stale():
+    assert widget.usage_for_cli(SAMPLE, now=UPDATED + 31 * 60)["stale"] is True
+    undated = widget.usage_for_cli({**SAMPLE, "updated_at": "garbage"})
+    assert undated["age_secs"] is None and undated["stale"] is True
+
+
+def test_stale_data_still_prints_but_warns(cache, monkeypatch, capsys):
+    cache.write_text(json.dumps(SAMPLE))  # written long before "now"
+    assert run(monkeypatch, "--json") == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["stale"] is True
+    assert "Is AIQuotaBar running?" in captured.err
+
+
+def test_malformed_provider_blocks_do_not_crash(cache, monkeypatch, capsys):
+    cache.write_text(json.dumps({**SAMPLE, "claude": "x", "chatgpt": {"rows": ["a", 1]},
+                                 "copilot": [], "cursor": {"rows": "nope"}}))
+    assert run(monkeypatch, "--json") == 0
+    assert json.loads(capsys.readouterr().out)["providers"] == {}
 
 
 def test_reports_provider_errors(cache, monkeypatch, capsys):
@@ -96,7 +130,7 @@ def test_round_trips_what_the_app_writes(cache, monkeypatch, capsys):
 
     assert run(monkeypatch, "-j") == 0
     out = json.loads(capsys.readouterr().out)
-    assert out["updated_at"]
+    assert out["updated_at"] and out["stale"] is False
     assert out["providers"]["claude"]["limits"] == [
         {"label": "Current Session", "pct": 64, "reset": "resets in 2h",
          "resets_at": 1793700000.0}]

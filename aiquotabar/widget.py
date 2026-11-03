@@ -135,6 +135,18 @@ def _write_widget_cache(
         log.debug("_write_widget_cache failed", exc_info=True)
 
 
+STALE_AFTER_SECS = 1800  # same threshold the widget uses (UsageData.swift isStale)
+
+
+def _obj(value) -> dict:
+    """The value if it is a JSON object, else {}: a malformed snapshot never crashes."""
+    return value if isinstance(value, dict) else {}
+
+
+def _rows(value) -> list[dict]:
+    return [r for r in value if isinstance(r, dict)] if isinstance(value, list) else []
+
+
 def _cli_limit(row: dict) -> dict:
     return {
         "label": row.get("label"),
@@ -144,38 +156,57 @@ def _cli_limit(row: dict) -> dict:
     }
 
 
-def usage_for_cli(snapshot: dict) -> dict:
-    """Reshape the widget snapshot into `{updated_at, providers: {id: {limits, error}}}`.
+def _age_secs(updated_at, now: float) -> int | None:
+    try:
+        return max(0, int(now - datetime.fromisoformat(updated_at).timestamp()))
+    except (TypeError, ValueError):
+        return None
 
+
+def usage_for_cli(snapshot: dict, now: float | None = None) -> dict:
+    """Reshape the widget snapshot into `{updated_at, age_secs, stale, providers}`.
+
+    `providers` maps id → {limits: [{label, pct, reset, resets_at}], error}.
     Only providers with data or an error appear. Older snapshots without
-    `resets_at` still work (it comes out as null).
+    `resets_at` still work (it comes out as null). Data older than 30 minutes,
+    or with no readable timestamp, is marked stale.
     """
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
     providers = {}
 
-    claude = snapshot.get("claude") or {}
-    rows = [claude.get(k) for k in ("session", "weekly_all", "weekly_sonnet")]
+    claude = _obj(snapshot.get("claude"))
+    rows = [_obj(claude.get(k)) for k in ("session", "weekly_all", "weekly_sonnet")]
     limits = [_cli_limit(r) for r in rows if r]
     if limits:
         providers["claude"] = {"limits": limits, "error": None}
 
     for pid in ("chatgpt", "cursor"):
-        block = snapshot.get(pid) or {}
-        limits = [_cli_limit(r) for r in (block.get("rows") or []) if r]
+        block = _obj(snapshot.get(pid))
+        limits = [_cli_limit(r) for r in _rows(block.get("rows"))]
         if limits or block.get("error"):
             providers[pid] = {"limits": limits, "error": block.get("error")}
 
-    copilot = snapshot.get("copilot") or {}
+    copilot = _obj(snapshot.get("copilot"))
     if copilot.get("pct") is not None:
         providers["copilot"] = {"limits": [{
             "label": "Premium requests",
             "pct": copilot.get("pct"),
+            "reset": None,        # Copilot reports no reset time;
+            "resets_at": None,    # keys kept so every limit has the same shape
             "spent": copilot.get("spent"),
             "limit": copilot.get("limit"),
         }], "error": None}
     elif copilot.get("error"):
         providers["copilot"] = {"limits": [], "error": copilot.get("error")}
 
-    return {"updated_at": snapshot.get("updated_at"), "providers": providers}
+    updated_at = snapshot.get("updated_at")
+    age = _age_secs(updated_at, now)
+    return {
+        "updated_at": updated_at,
+        "age_secs": age,
+        "stale": age is None or age > STALE_AFTER_SECS,
+        "providers": providers,
+    }
 
 
 def cli_json() -> int:
@@ -193,7 +224,13 @@ def cli_json() -> int:
     except (OSError, ValueError) as e:
         print(f"Could not read {WIDGET_CACHE_FILE}: {e}", file=sys.stderr)
         return 1
-    print(json.dumps(usage_for_cli(snapshot), indent=2))
+    out = usage_for_cli(snapshot)
+    if out["stale"]:
+        age = out["age_secs"]
+        when = f"{age // 60} min ago" if age is not None else "at an unknown time"
+        print(f"Warning: usage data was last updated {when}. Is AIQuotaBar running?",
+              file=sys.stderr)
+    print(json.dumps(out, indent=2))
     return 0
 
 
