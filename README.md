@@ -111,6 +111,7 @@ aiquotabar &                      # update later with: brew upgrade --fetch-HEAD
 git clone https://github.com/yagcioglutoprak/AIQuotaBar.git && cd AIQuotaBar
 pip install -r requirements.txt
 python3 claude_bar.py            # add --demo to try it with sample data, no accounts needed
+python3 claude_bar.py --json     # current usage as JSON, for scripts and status bars
 ```
 </details>
 
