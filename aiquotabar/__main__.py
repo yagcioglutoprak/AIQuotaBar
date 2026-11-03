@@ -3,6 +3,7 @@
     python3 claude_bar.py            run the menu bar app
     python3 claude_bar.py --demo     run with sample data (no accounts, nothing saved)
     python3 claude_bar.py --history  print a 7-day usage chart in the terminal
+    python3 claude_bar.py --json     print current usage as JSON (-j; needs the app running)
 """
 
 import os
@@ -61,6 +62,9 @@ def main():
         from aiquotabar.history import cli_history
         cli_history()
         return
+    if args and args[0] in ("--json", "-j"):
+        from aiquotabar.widget import cli_json
+        sys.exit(cli_json())
     if args and args[0] in ("--version", "-V"):
         from aiquotabar import __version__
         print(f"AIQuotaBar {__version__}")

@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 
 from aiquotabar.config import log, WIDGET_HOST_APP, WIDGET_CACHE_DIR, WIDGET_CACHE_FILE
@@ -28,7 +29,8 @@ def _write_widget_cache(
         def _row_dict(row: LimitRow | None) -> dict | None:
             if row is None:
                 return None
-            return {"label": row.label, "pct": row.pct, "reset_str": row.reset_str}
+            return {"label": row.label, "pct": row.pct, "reset_str": row.reset_str,
+                    "resets_at": row.resets_at}
 
         def _active_providers(cfg: dict) -> list[str]:
             """Return list of provider IDs the user has configured."""
@@ -131,6 +133,105 @@ def _write_widget_cache(
             )
     except Exception:
         log.debug("_write_widget_cache failed", exc_info=True)
+
+
+STALE_AFTER_SECS = 1800  # same threshold the widget uses (UsageData.swift isStale)
+
+
+def _obj(value) -> dict:
+    """The value if it is a JSON object, else {}: a malformed snapshot never crashes."""
+    return value if isinstance(value, dict) else {}
+
+
+def _rows(value) -> list[dict]:
+    return [r for r in value if isinstance(r, dict)] if isinstance(value, list) else []
+
+
+def _cli_limit(row: dict) -> dict:
+    return {
+        "label": row.get("label"),
+        "pct": row.get("pct"),
+        "reset": row.get("reset_str"),
+        "resets_at": row.get("resets_at"),
+    }
+
+
+def _age_secs(updated_at, now: float) -> int | None:
+    try:
+        return max(0, int(now - datetime.fromisoformat(updated_at).timestamp()))
+    except (TypeError, ValueError):
+        return None
+
+
+def usage_for_cli(snapshot: dict, now: float | None = None) -> dict:
+    """Reshape the widget snapshot into `{updated_at, age_secs, stale, providers}`.
+
+    `providers` maps id → {limits: [{label, pct, reset, resets_at}], error}.
+    Only providers with data or an error appear. Older snapshots without
+    `resets_at` still work (it comes out as null). Data older than 30 minutes,
+    or with no readable timestamp, is marked stale.
+    """
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    providers = {}
+
+    claude = _obj(snapshot.get("claude"))
+    rows = [_obj(claude.get(k)) for k in ("session", "weekly_all", "weekly_sonnet")]
+    limits = [_cli_limit(r) for r in rows if r]
+    if limits:
+        providers["claude"] = {"limits": limits, "error": None}
+
+    for pid in ("chatgpt", "cursor"):
+        block = _obj(snapshot.get(pid))
+        limits = [_cli_limit(r) for r in _rows(block.get("rows"))]
+        if limits or block.get("error"):
+            providers[pid] = {"limits": limits, "error": block.get("error")}
+
+    copilot = _obj(snapshot.get("copilot"))
+    if copilot.get("pct") is not None:
+        providers["copilot"] = {"limits": [{
+            "label": "Premium requests",
+            "pct": copilot.get("pct"),
+            "reset": None,        # Copilot reports no reset time;
+            "resets_at": None,    # keys kept so every limit has the same shape
+            "spent": copilot.get("spent"),
+            "limit": copilot.get("limit"),
+        }], "error": None}
+    elif copilot.get("error"):
+        providers["copilot"] = {"limits": [], "error": copilot.get("error")}
+
+    updated_at = snapshot.get("updated_at")
+    age = _age_secs(updated_at, now)
+    return {
+        "updated_at": updated_at,
+        "age_secs": age,
+        "stale": age is None or age > STALE_AFTER_SECS,
+        "providers": providers,
+    }
+
+
+def cli_json() -> int:
+    """`--json`: print the latest snapshot for scripts. Returns the exit code."""
+    try:
+        with open(WIDGET_CACHE_FILE) as f:
+            snapshot = json.load(f)
+        if not isinstance(snapshot, dict):
+            raise ValueError("snapshot is not an object")
+    except FileNotFoundError:
+        print("No usage data yet. Start AIQuotaBar and wait for the first refresh "
+              "(the snapshot is only written while Settings → About → Desktop widget is on).",
+              file=sys.stderr)
+        return 1
+    except (OSError, ValueError) as e:
+        print(f"Could not read {WIDGET_CACHE_FILE}: {e}", file=sys.stderr)
+        return 1
+    out = usage_for_cli(snapshot)
+    if out["stale"]:
+        age = out["age_secs"]
+        when = f"{age // 60} min ago" if age is not None else "at an unknown time"
+        print(f"Warning: usage data was last updated {when}. Is AIQuotaBar running?",
+              file=sys.stderr)
+    print(json.dumps(out, indent=2))
+    return 0
 
 
 def _is_widget_installed() -> bool:
