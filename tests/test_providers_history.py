@@ -277,10 +277,16 @@ class _C:
 _JARS = json.loads(os.environ["FAKE_JARS"])
 
 def _jar(browser):
-    def fn(domain_name=None):
-        if browser not in _JARS:
+    def fn(domain_name=None, cookie_file=None):
+        key = browser
+        if cookie_file is not None:
+            folder = os.path.dirname(cookie_file)
+            if os.path.basename(folder) == 'Network':
+                folder = os.path.dirname(folder)
+            key += ':' + os.path.basename(folder)
+        if key not in _JARS:
             raise RuntimeError("no profile")
-        return [_C(*c) for c in _JARS[browser]]
+        return [_C(*c) for c in _JARS[key]]
     return fn
 
 firefox = _jar("firefox")
@@ -299,6 +305,24 @@ def fake_browsers(tmp_path, monkeypatch):
 
 
 TOKEN = "__Secure-next-auth.session-token"
+
+
+@pytest.mark.parametrize("cookie_path", ["Cookies", "Network/Cookies"])
+def test_detection_reads_non_default_chrome_profiles(fake_browsers, tmp_path, monkeypatch, cookie_path):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root = home / "Library/Application Support/Google/Chrome"
+    for profile in ("Default", "Profile 1"):
+        path = root / profile / cookie_path
+        path.parent.mkdir(parents=True)
+        path.touch()
+    fake_browsers({"chrome:Default": [["unrelated", "x", 2e9]],
+                   "chrome:Profile 1": [["sessionKey", "signed-in", 2e9],
+                                        ["lastActiveOrg", "org", 2e9]]})
+
+    found = providers._run_cookie_detection("claude.ai", "sessionKey")
+
+    assert found == ["sessionKey=signed-in; lastActiveOrg=org"]
 
 
 def test_detects_chunked_nextauth_session(fake_browsers):

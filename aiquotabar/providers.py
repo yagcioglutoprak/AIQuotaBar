@@ -687,6 +687,7 @@ def _warn_keychain_once():
 # (libcrypto / sqlite segfaults on Chromium decryption don't kill the main app).
 _DETECT_SCRIPT = r"""
 import sys, json
+from pathlib import Path
 
 domain  = sys.argv[1]
 target  = sys.argv[2]
@@ -704,12 +705,25 @@ candidates = []  # list of (expires_seconds, cookie_str)
 
 try:
     import browser_cookie3
+    sources = []
     for name in BROWSERS:
         fn = getattr(browser_cookie3, name, None)
         if fn is None:
             continue
+        cookie_files = [None]
+        if name == 'chrome':
+            root = Path.home() / 'Library/Application Support/Google'
+            patterns = [
+                'Chrome*/Default/Cookies', 'Chrome*/Profile */Cookies',
+                'Chrome*/Default/Network/Cookies', 'Chrome*/Profile */Network/Cookies',
+            ]
+            cookie_files = sorted({p for pattern in patterns for p in root.glob(pattern)
+                                   if p.is_file()}) or [None]
+        sources.extend((name, fn, path) for path in cookie_files)
+    for name, fn, cookie_file in sources:
         try:
-            jar = fn(domain_name=domain)
+            kwargs = {'cookie_file': str(cookie_file)} if cookie_file is not None else {}
+            jar = fn(domain_name=domain, **kwargs)
             cookies = {x.name: x for x in jar}
             if target in cookies:
                 expiry_key = target
@@ -755,7 +769,7 @@ def _run_cookie_detection(domain: str, target_cookie: str) -> list[str]:
     """Run browser_cookie3 in an isolated child process (crash-safe).
 
     Returns a best-first ranked list of candidate cookie strings (one per
-    browser that has the target cookie). Empty list if none are found.
+    browser profile that has the target cookie). Empty list if none are found.
     """
     try:
         r = subprocess.run(
