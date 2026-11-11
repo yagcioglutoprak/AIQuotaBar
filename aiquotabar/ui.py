@@ -306,6 +306,13 @@ class ClaudeBar(rumps.App):
                 log.exception("fallback menu failed")
 
     def _startup_ui(self):
+        from AppKit import NSApplication, NSImage
+
+        icon_path = os.path.join(_ICON_DIR, "logo.png")
+        app_icon = NSImage.alloc().initWithContentsOfFile_(icon_path)
+        if app_icon is None:
+            raise FileNotFoundError(icon_path)
+        NSApplication.sharedApplication().setApplicationIconImage_(app_icon)
         try:
             webview.install_edit_menu()
         except Exception:
