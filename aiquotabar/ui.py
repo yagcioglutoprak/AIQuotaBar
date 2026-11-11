@@ -867,9 +867,10 @@ class ClaudeBar(rumps.App):
         if self._demo:
             return
         if not _BROWSER_COOKIE3_OK:
-            _notify("AIQuotaBar", "browser-cookie3 is not installed",
-                    "Run: pip install browser-cookie3")
-            return
+            if any(pid != "chatgpt" for pid in pids):
+                _notify("AIQuotaBar", "browser-cookie3 is not installed",
+                        "Run: pip install browser-cookie3")
+            pids = [pid for pid in pids if pid == "chatgpt"]
         with self._state_lock:
             pids = [p for p in pids if p not in self._detecting]
             self._detecting.update(pids)
@@ -896,8 +897,12 @@ class ClaudeBar(rumps.App):
                 found.append(pid)
             elif manual:
                 name = theme.PROVIDERS[pid]["name"]
+                if pid == "chatgpt" and not _BROWSER_COOKIE3_OK:
+                    message = "Sign in to Codex, or install browser-cookie3 to detect your browser session."
+                else:
+                    message = f"Sign in to {SIGN_IN_DOMAINS[pid]} in your browser, then try again."
                 _notify("AIQuotaBar", f"No {name} session found",
-                        f"Sign in to {SIGN_IN_DOMAINS[pid]} in your browser, then try again.")
+                        message)
             with self._state_lock:
                 self._detecting.discard(pid)
             self._post_update()

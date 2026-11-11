@@ -234,6 +234,48 @@ def test_refreshes_never_scan_browsers_after_auth_failures(ui, monkeypatch):
     assert app._provider_data[0].error == "401 not logged in"
 
 
+@pytest.mark.parametrize("provider", ["chatgpt", "all"])
+def test_explicit_connection_uses_codex_login_without_browser_reader(ui, monkeypatch, tmp_path, provider):
+    from aiquotabar import providers
+    from aiquotabar.config import CONFIG_FILE, save_config
+
+    save_config({"disabled_providers": ["claude", "cursor", "copilot"]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    auth_dir = os.path.expanduser("~/.codex")
+    os.makedirs(auth_dir, exist_ok=True)
+    with open(os.path.join(auth_dir, "auth.json"), "w") as f:
+        json.dump({"tokens": {"access_token": "test-access-token", "account_id": "test-account"}}, f)
+    monkeypatch.setattr(ui, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setattr(providers, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setitem(ui.DETECTORS, "chatgpt", providers._auto_detect_chatgpt_cookies)
+
+    app = start(ui.ClaudeBar())
+    send(app._panel.host, action="detect", provider=provider)
+
+    with open(CONFIG_FILE) as f:
+        saved = json.load(f)
+    assert saved["chatgpt_cookies"] == providers.CODEX_CLI_SESSION
+
+
+def test_missing_codex_login_without_browser_reader_explains_recovery(ui, monkeypatch, tmp_path):
+    from aiquotabar import providers
+    from aiquotabar.config import save_config
+
+    save_config({})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(ui, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setattr(providers, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setitem(ui.DETECTORS, "chatgpt", providers._auto_detect_chatgpt_cookies)
+    notifications = []
+    monkeypatch.setattr(ui, "_notify", lambda *args: notifications.append(args))
+
+    app = start(ui.ClaudeBar())
+    send(app._panel.host, action="detect", provider="chatgpt")
+
+    assert any("Sign in to Codex" in note[2] and "browser-cookie3" in note[2]
+               for note in notifications)
+
+
 def test_real_fetch_path_with_stubbed_network(ui, monkeypatch):
     from aiquotabar.config import save_config
 
