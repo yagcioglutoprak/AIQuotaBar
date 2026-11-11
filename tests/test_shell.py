@@ -179,7 +179,107 @@ def test_share_image_copy_save_and_x(ui):
     send(app._panel.host, action="share_image", mode="copy", png="data:text/html,<b>")   # ignored
 
 
+def test_refreshes_never_scan_browsers_for_missing_accounts(ui, monkeypatch):
+    from aiquotabar.config import save_config
+
+    save_config({})
+    detected = []
+    monkeypatch.setattr(ui, "_auto_detect_cookies", lambda: detected.append("claude"))
+    for pid in ui.DETECTORS:
+        monkeypatch.setitem(ui.DETECTORS, pid, lambda pid=pid: detected.append(pid))
+    clock = [time.time()]
+    monkeypatch.setattr(ui.time, "time", lambda: clock[0])
+
+    app = ui.ClaudeBar()
+    for _ in range(3):
+        clock[0] += 35 * 60
+        app._on_timer(None)
+    ui.ClaudeBar()
+
+    assert detected == []
+    assert app._claude_error["kind"] == "missing"
+
+
+def test_refreshes_never_scan_browsers_after_auth_failures(ui, monkeypatch):
+    from aiquotabar.config import save_config
+    from aiquotabar.providers import ProviderData
+
+    class Resp:
+        status_code = 401
+
+    def expired(cookie):
+        error = HTTPError("401 Unauthorized")
+        error.response = Resp()
+        raise error
+
+    detected = []
+    monkeypatch.setattr(ui, "fetch_raw", expired)
+    monkeypatch.setattr(ui, "_auto_detect_cookies", lambda: detected.append("claude"))
+    monkeypatch.setitem(ui.DETECTORS, "chatgpt", lambda: detected.append("chatgpt"))
+    monkeypatch.setattr(ui, "PROVIDER_REGISTRY", {
+        "chatgpt_cookies": ("ChatGPT", lambda cookie: ProviderData("ChatGPT", error="401 not logged in")),
+    })
+    save_config({"cookie_str": "expired", "chatgpt_cookies": "expired",
+                 "disabled_providers": ["cursor", "copilot"]})
+    clock = [time.time()]
+    monkeypatch.setattr(ui.time, "time", lambda: clock[0])
+
+    app = ui.ClaudeBar()
+    for _ in range(3):
+        clock[0] += 35 * 60
+        app._on_timer(None)
+
+    assert detected == []
+    assert app._claude_error["kind"] == "auth"
+    assert app._provider_data[0].error == "401 not logged in"
+
+
+@pytest.mark.parametrize("provider", ["chatgpt", "all"])
+def test_explicit_connection_uses_codex_login_without_browser_reader(ui, monkeypatch, tmp_path, provider):
+    from aiquotabar import providers
+    from aiquotabar.config import CONFIG_FILE, save_config
+
+    save_config({"disabled_providers": ["claude", "cursor", "copilot"]})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    auth_dir = os.path.expanduser("~/.codex")
+    os.makedirs(auth_dir, exist_ok=True)
+    with open(os.path.join(auth_dir, "auth.json"), "w") as f:
+        json.dump({"tokens": {"access_token": "test-access-token", "account_id": "test-account"}}, f)
+    monkeypatch.setattr(ui, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setattr(providers, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setitem(ui.DETECTORS, "chatgpt", providers._auto_detect_chatgpt_cookies)
+
+    app = start(ui.ClaudeBar())
+    send(app._panel.host, action="detect", provider=provider)
+
+    with open(CONFIG_FILE) as f:
+        saved = json.load(f)
+    assert saved["chatgpt_cookies"] == providers.CODEX_CLI_SESSION
+
+
+def test_missing_codex_login_without_browser_reader_explains_recovery(ui, monkeypatch, tmp_path):
+    from aiquotabar import providers
+    from aiquotabar.config import save_config
+
+    save_config({})
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(ui, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setattr(providers, "_BROWSER_COOKIE3_OK", False)
+    monkeypatch.setitem(ui.DETECTORS, "chatgpt", providers._auto_detect_chatgpt_cookies)
+    notifications = []
+    monkeypatch.setattr(ui, "_notify", lambda *args: notifications.append(args))
+
+    app = start(ui.ClaudeBar())
+    send(app._panel.host, action="detect", provider="chatgpt")
+
+    assert any("Sign in to Codex" in note[2] and "browser-cookie3" in note[2]
+               for note in notifications)
+
+
 def test_real_fetch_path_with_stubbed_network(ui, monkeypatch):
+    from aiquotabar.config import save_config
+
+    save_config({})
     reset = "2030-01-01T10:00:00+00:00"
     raw = {"usage": {"five_hour": {"utilization": 85, "resets_at": reset},
                      "seven_day": {"utilization": 30, "resets_at": reset}},
@@ -208,7 +308,8 @@ def test_real_fetch_path_with_stubbed_network(ui, monkeypatch):
     registry["chatgpt_cookies"] = ("ChatGPT", fake_chatgpt)
     monkeypatch.setattr(ui, "PROVIDER_REGISTRY", registry)
 
-    app = ui.ClaudeBar()               # the constructor runs the first fetch cycle
+    app = ui.ClaudeBar()
+    app._detect_async(list(ui.DETECTORS), manual=True)
     assert app._last_data.session.pct == 85
     assert [p.name for p in app._provider_data] == ["ChatGPT"]
     assert set(detected) >= {"claude", "chatgpt", "cursor", "copilot"}
@@ -218,7 +319,6 @@ def test_real_fetch_path_with_stubbed_network(ui, monkeypatch):
     n = len(fake_macos.NOTIFICATIONS)
     app._fetch_and_update()
     assert len(fake_macos.NOTIFICATIONS) == n
-    # Detection for missing providers is throttled, not repeated every cycle.
     assert detected.count("cursor") == 1
 
     # Config on disk has the detected cookies (and no demo leftovers).
@@ -227,7 +327,7 @@ def test_real_fetch_path_with_stubbed_network(ui, monkeypatch):
     assert saved["cookie_str"].startswith("sessionKey=") and "chatgpt_cookies" in saved
 
 
-def test_claude_auth_failure_recovers_with_fresh_cookie(ui, monkeypatch):
+def test_explicit_reconnect_recovers_with_fresh_cookie(ui, monkeypatch):
     class Resp:
         status_code = 403
     calls = {"n": 0}
@@ -240,12 +340,15 @@ def test_claude_auth_failure_recovers_with_fresh_cookie(ui, monkeypatch):
             raise err
         return {"usage": {"five_hour": {"utilization": 5, "resets_at": None}}}
     monkeypatch.setattr(ui, "fetch_raw", fetch_raw)
-    monkeypatch.setattr(ui, "_auto_detect_cookies", lambda: "fresh")
+    monkeypatch.setitem(ui.DETECTORS, "claude", lambda: "fresh")
     from aiquotabar.config import save_config
     save_config({"cookie_str": "old", "disabled_providers": ["chatgpt", "cursor", "copilot"]})
     app = ui.ClaudeBar()               # first failure
     assert app._claude_error["kind"] == "auth"
-    app._fetch_and_update()           # second failure → re-detect → schedules a retry
+    app._fetch_and_update()
+    assert app.config["cookie_str"] == "old"
+    start(app)
+    send(app._panel.host, action="detect", provider="claude")
     assert app.config["cookie_str"] == "fresh"
     app._fetch_claude()
     assert app._claude_error is None and app._last_data.session.pct == 5
