@@ -290,7 +290,23 @@ def _jar(browser):
     return fn
 
 firefox = _jar("firefox")
-chrome = _jar("chrome")
+_CHROME_KEYCHAIN_READS = 0
+
+class Chrome:
+    def __init__(self, cookie_file=None, domain_name=None):
+        global _CHROME_KEYCHAIN_READS
+        _CHROME_KEYCHAIN_READS += 1
+        limit = os.environ.get("FAKE_CHROME_KEYCHAIN_LIMIT")
+        if limit is not None and _CHROME_KEYCHAIN_READS > int(limit):
+            raise RuntimeError("another Keychain approval is required")
+        self.cookie_file = cookie_file
+        self.domain_name = domain_name
+
+    def load(self):
+        return _jar("chrome")(domain_name=self.domain_name, cookie_file=self.cookie_file)
+
+def chrome(domain_name=None, cookie_file=None):
+    return Chrome(cookie_file=cookie_file, domain_name=domain_name).load()
 """
 
 
@@ -308,7 +324,11 @@ TOKEN = "__Secure-next-auth.session-token"
 
 
 @pytest.mark.parametrize("cookie_path", ["Cookies", "Network/Cookies"])
-def test_detection_reads_non_default_chrome_profiles(fake_browsers, tmp_path, monkeypatch, cookie_path):
+@pytest.mark.parametrize("keychain_limit", [None, 1])
+def test_detection_reads_non_default_chrome_profiles(fake_browsers, tmp_path, monkeypatch,
+                                                    cookie_path, keychain_limit):
+    if keychain_limit is not None:
+        monkeypatch.setenv("FAKE_CHROME_KEYCHAIN_LIMIT", str(keychain_limit))
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     root = home / "Library/Application Support/Google/Chrome"

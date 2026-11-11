@@ -720,10 +720,18 @@ try:
             cookie_files = sorted({p for pattern in patterns for p in root.glob(pattern)
                                    if p.is_file()}) or [None]
         sources.extend((name, fn, path) for path in cookie_files)
+    chrome_reader = None
     for name, fn, cookie_file in sources:
         try:
-            kwargs = {'cookie_file': str(cookie_file)} if cookie_file is not None else {}
-            jar = fn(domain_name=domain, **kwargs)
+            if name == 'chrome' and cookie_file is not None:
+                if chrome_reader is None:
+                    chrome_reader = browser_cookie3.Chrome(
+                        cookie_file=str(cookie_file), domain_name=domain)
+                else:
+                    chrome_reader.cookie_file = str(cookie_file)
+                jar = chrome_reader.load()
+            else:
+                jar = fn(domain_name=domain)
             cookies = {x.name: x for x in jar}
             if target in cookies:
                 expiry_key = target
