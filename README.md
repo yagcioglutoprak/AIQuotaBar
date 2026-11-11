@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/yagcioglutoprak/AIQuotaBar/main/ins
 - **A glanceable menu bar** — numbers turn orange, then red, as you get close.
 - **Alerts you control** — warning, critical, pace and "you're back" notifications, per service.
 - **History and sharing** — 24-hour trends, daily peaks, a 90-day calendar and a one-click share image.
-- **Zero setup** — it reuses the sessions already in your browser. No API keys, no copy-pasting.
+- **Connect from your browser** — it reuses your signed-in accounts. No API keys, no copy-pasting.
 
 <br clear="right">
 
@@ -50,7 +50,7 @@ I kept getting cut off mid-session on Claude Pro with no warning. claude.ai does
 | **Claude Code** | Messages, sessions and tool calls | Local stats in `~/.claude` |
 | **OpenAI · MiniMax · GLM** | API spend or balance *(optional)* | An API key in Settings |
 
-Sessions are found automatically in Chrome, Arc, Brave, Edge, Firefox and Safari.
+Click **Detect** in Settings → Accounts to connect from Chrome, Arc, Brave, Edge, Firefox or Safari.
 
 ## A quick tour
 
@@ -92,7 +92,7 @@ Sessions are found automatically in Chrome, Arc, Brave, Edge, Firefox and Safari
 curl -fsSL https://raw.githubusercontent.com/yagcioglutoprak/AIQuotaBar/main/install.sh | bash
 ```
 
-Look for the icon in your menu bar. On first launch, a welcome window shows which accounts it found.
+Look for the icon in your menu bar. In Settings → Accounts, click **Detect** to connect your accounts.
 
 **Requirements:** macOS 12+, Python 3.10+, and a paid plan on at least one supported service.
 
@@ -131,7 +131,7 @@ rm -rf /Applications/AIQuotaBarHost.app      # the desktop widget, if installed
 
 - **Local only.** Session cookies are read from your browser on your Mac and stored only in `~/.claude_bar_config.json`.
 - **Direct requests.** It calls the same usage endpoints each provider's own settings page uses, straight from your Mac. There's no AIQuotaBar server, no analytics and no telemetry.
-- **One Keychain prompt.** Chrome, Arc, Brave and Edge encrypt cookies with a key kept in the Keychain, so macOS asks once — choose **Always Allow**. Firefox needs no prompt.
+- **Browser access on request.** Detect and Reconnect can request Keychain access. Quota refreshes reuse saved credentials and never scan browsers.
 - **Lightweight.** The panel is plain HTML drawn by macOS's built-in WebKit, not Electron.
 
 ## FAQ

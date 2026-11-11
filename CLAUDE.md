@@ -99,13 +99,13 @@ A native macOS WidgetKit widget in `AIQuotaBarWidget/` shows usage on the deskto
   installed, the app never runs `open -a AIQuotaBarHost` (that launch is what brings back the
   host's window).
 - **Firefox/LibreWolf first** in browser detection order — no Keychain prompt, zero friction.
-  Chromium browsers (Arc, Chrome, Brave) come after; they need one-time "Always Allow".
+  Chromium browsers (Arc, Chrome, Brave) come after and can request Keychain access.
 - **API utilization scale is now consistent**: all fields (`five_hour`, `seven_day`,
   `seven_day_sonnet`) return 0–100 percentage. No conversion needed.
 - **`rumps.notification` crashes** in dev (missing Info.plist CFBundleIdentifier).
   All notifications go through `_notify()` which swallows the exception silently.
-- **Cookies are cached** in `~/.claude_bar_config.json`. Auto-detect runs on first launch
-  and on repeated 401/403 failures to silently refresh the session.
+- **Cookies are cached** in `~/.claude_bar_config.json`. Browser detection runs only after
+  an explicit Detect, Reconnect or Enable action. Startup and quota refreshes never scan browsers.
 - **ChatGPT falls back to the Codex CLI login** (`$CODEX_HOME` or `~/.codex/auth.json`) when no
   browser session is found or the stored one fails. `chatgpt_cookies == "codex-cli"` marks that
   mode. The token is read on every fetch, never copied into our config and never refreshed:

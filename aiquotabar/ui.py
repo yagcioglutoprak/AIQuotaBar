@@ -57,7 +57,6 @@ DETECTORS = {
     "copilot": _auto_detect_copilot_cookies,
     "cursor":  _auto_detect_cursor_cookies,
 }
-REDETECT_EVERY = 30 * 60      # retry browser detection for missing / signed-out providers
 OPEN_URL_HOSTS = {"claude.ai", "chatgpt.com", "cursor.com", "github.com", "x.com", "twitter.com"}
 LAUNCH_AGENT = os.path.expanduser("~/Library/LaunchAgents/com.claudebar.plist")
 
@@ -232,7 +231,6 @@ class ClaudeBar(rumps.App):
         self._prev_pcts: dict[str, int] = {}
         self._pacing_alerted: set[str] = set()
         self._auth_fail_count = 0
-        self._detect_attempts: dict[str, float] = {}
 
         # -- threading --
         self._fetching = False
@@ -533,7 +531,7 @@ class ClaudeBar(rumps.App):
                 items.append(None)
             items += [
                 rumps.MenuItem("Refresh Now", callback=lambda _: self._schedule_fetch()),
-                rumps.MenuItem("Auto-detect from Browser", callback=lambda _: self._detect_async(list(DETECTORS))),
+                rumps.MenuItem("Auto-detect from Browser", callback=lambda _: self._detect_async(list(DETECTORS), manual=True)),
                 rumps.MenuItem("Set Claude Cookie…", callback=self._set_cookie_dialog),
                 self._interval_menu(),
                 self._login_menu_item(),
@@ -888,7 +886,6 @@ class ClaudeBar(rumps.App):
                 cookie = DETECTORS[pid]()
             except Exception:
                 log.exception("cookie detection failed for %s", pid)
-            self._detect_attempts[pid] = time.time()
             if cookie:
                 with self._config_lock:
                     self.config[COOKIE_KEYS[pid]] = cookie
@@ -966,20 +963,6 @@ class ClaudeBar(rumps.App):
             return
         with self._config_lock:
             cookie = self.config.get("cookie_str")
-        if not cookie and self._should_detect("claude"):
-            with self._state_lock:
-                self._detecting.add("claude")
-            self._post_update()
-            try:
-                cookie = _auto_detect_cookies()
-            finally:
-                self._detect_attempts["claude"] = time.time()
-                with self._state_lock:
-                    self._detecting.discard("claude")
-            if cookie:
-                with self._config_lock:
-                    self.config["cookie_str"] = cookie
-                    self._save()
         if not cookie:
             with self._state_lock:
                 self._last_data = None
@@ -1020,47 +1003,13 @@ class ClaudeBar(rumps.App):
             self._claude_error = {"kind": "auth", "message": message or f"{code} session expired"}
             if self._auth_fail_count >= 2:
                 self._last_data = None
-        if self._auth_fail_count >= 2 and self._should_detect("claude", force_after=5 * 60):
-            self._detect_attempts["claude"] = time.time()
-            fresh = _auto_detect_cookies()
-            if fresh and fresh != self.config.get("cookie_str"):
-                with self._config_lock:
-                    self.config["cookie_str"] = fresh
-                    self._save()
-                self._auth_fail_count = 0
-                self._warned_pcts.clear()
-                log.info("Claude auth failed — picked up a fresh browser session")
-                with self._state_lock:
-                    self._refetch = True
-            elif self._auth_fail_count == 2:
-                _notify("AIQuotaBar", "Claude session expired",
-                        "Sign in to claude.ai in your browser — AIQuotaBar will pick it up.")
-
-    def _should_detect(self, pid: str, force_after: float = REDETECT_EVERY) -> bool:
-        return time.time() - self._detect_attempts.get(pid, 0) > force_after
+        if self._auth_fail_count == 2:
+            _notify("AIQuotaBar", "Claude session expired",
+                    "Sign in to claude.ai in your browser, then click Reconnect in AIQuotaBar.")
 
     def _fetch_providers(self):
         """Fetch every configured provider in parallel — independent of Claude."""
         disabled = set(self.config.get("disabled_providers", []))
-        for cfg_key in COOKIE_PROVIDERS:
-            pid = next(p for p, k in COOKIE_KEYS.items() if k == cfg_key)
-            if pid in disabled or self.config.get(cfg_key) or not self._should_detect(pid):
-                continue
-            with self._state_lock:
-                self._detecting.add(pid)
-            self._post_update()
-            try:
-                cookie = DETECTORS[pid]()
-            except Exception:
-                cookie = None
-            self._detect_attempts[pid] = time.time()
-            with self._state_lock:
-                self._detecting.discard(pid)
-            if cookie:
-                with self._config_lock:
-                    self.config[cfg_key] = cookie
-                    self._save()
-
         with self._config_lock:
             keys = {k: self.config.get(k) for k in PROVIDER_REGISTRY}
         tasks = []
@@ -1079,20 +1028,6 @@ class ClaudeBar(rumps.App):
                     except Exception:
                         log.exception("provider fetch failed: %s", cfg_key)
 
-        # A signed-out cookie provider: look for a fresher browser session.
-        for pd in results:
-            pid = theme.NAME_TO_ID.get(pd.name)
-            if pid in COOKIE_KEYS and pid != "claude" and pd.error and \
-                    any(s in pd.error.lower() for s in ("401", "403", "not logged in")) and \
-                    self._should_detect(pid):
-                self._detect_attempts[pid] = time.time()
-                fresh = DETECTORS[pid]()
-                if fresh and fresh != self.config.get(COOKIE_KEYS[pid]):
-                    with self._config_lock:
-                        self.config[COOKIE_KEYS[pid]] = fresh
-                        self._save()
-                    with self._state_lock:
-                        self._refetch = True
         with self._state_lock:
             self._provider_data = results
 
