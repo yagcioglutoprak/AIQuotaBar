@@ -277,14 +277,36 @@ class _C:
 _JARS = json.loads(os.environ["FAKE_JARS"])
 
 def _jar(browser):
-    def fn(domain_name=None):
-        if browser not in _JARS:
+    def fn(domain_name=None, cookie_file=None):
+        key = browser
+        if cookie_file is not None:
+            folder = os.path.dirname(cookie_file)
+            if os.path.basename(folder) == 'Network':
+                folder = os.path.dirname(folder)
+            key += ':' + os.path.basename(folder)
+        if key not in _JARS:
             raise RuntimeError("no profile")
-        return [_C(*c) for c in _JARS[browser]]
+        return [_C(*c) for c in _JARS[key]]
     return fn
 
 firefox = _jar("firefox")
-chrome = _jar("chrome")
+_CHROME_KEYCHAIN_READS = 0
+
+class Chrome:
+    def __init__(self, cookie_file=None, domain_name=None):
+        global _CHROME_KEYCHAIN_READS
+        _CHROME_KEYCHAIN_READS += 1
+        limit = os.environ.get("FAKE_CHROME_KEYCHAIN_LIMIT")
+        if limit is not None and _CHROME_KEYCHAIN_READS > int(limit):
+            raise RuntimeError("another Keychain approval is required")
+        self.cookie_file = cookie_file
+        self.domain_name = domain_name
+
+    def load(self):
+        return _jar("chrome")(domain_name=self.domain_name, cookie_file=self.cookie_file)
+
+def chrome(domain_name=None, cookie_file=None):
+    return Chrome(cookie_file=cookie_file, domain_name=domain_name).load()
 """
 
 
@@ -299,6 +321,28 @@ def fake_browsers(tmp_path, monkeypatch):
 
 
 TOKEN = "__Secure-next-auth.session-token"
+
+
+@pytest.mark.parametrize("cookie_path", ["Cookies", "Network/Cookies"])
+@pytest.mark.parametrize("keychain_limit", [None, 1])
+def test_detection_reads_non_default_chrome_profiles(fake_browsers, tmp_path, monkeypatch,
+                                                    cookie_path, keychain_limit):
+    if keychain_limit is not None:
+        monkeypatch.setenv("FAKE_CHROME_KEYCHAIN_LIMIT", str(keychain_limit))
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    root = home / "Library/Application Support/Google/Chrome"
+    for profile in ("Default", "Profile 1"):
+        path = root / profile / cookie_path
+        path.parent.mkdir(parents=True)
+        path.touch()
+    fake_browsers({"chrome:Default": [["unrelated", "x", 2e9]],
+                   "chrome:Profile 1": [["sessionKey", "signed-in", 2e9],
+                                        ["lastActiveOrg", "org", 2e9]]})
+
+    found = providers._run_cookie_detection("claude.ai", "sessionKey")
+
+    assert found == ["sessionKey=signed-in; lastActiveOrg=org"]
 
 
 def test_detects_chunked_nextauth_session(fake_browsers):
